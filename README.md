@@ -1,7 +1,7 @@
 NFL Weather RShiny App (2026 Season)
 =====================================
 
-**Live Application:** [Experience the NFL Gameday Weather Dashboard on ShinyApps](https://rcuevas.shinyapps.io/NFL_Gameday_Weather/)
+**Live Application:** [Experience the NFL Weather Dashboard on ShinyApps](https://rcuevas.shinyapps.io/NFL_Weather/)
 
 An interactive R Shiny dashboard providing detailed weather forecasts and game-day impact analysis for the 2026 NFL regular season and playoffs.
 
@@ -14,15 +14,17 @@ Key Features
 
 *   **Interactive Filtering:** View the entire 2026 NFL schedule by Week, Stadium, Team, or a specific Date.
 *   **Dynamic UI:** The interface updates intelligently based on your selections to show you the most relevant games.
-*   **Live Weather Data:** Utilizes the National Weather Service (NWS) API for up-to-date daily and hourly forecast information.
+*   **Live Weather Data:** Utilizes the National Weather Service (NWS) API for up-to-date daily and hourly forecast information, plus real-time ASOS observations via the `riem` package. A **Refresh Weather Data** button clears the cache and re-pulls the latest conditions on demand.
 *   **Game Impact Assessment:** A color-coded system (Green, Yellow, Red) provides an immediate sense of the potential for weather to disrupt a game.
 *   **Custom Gameplay Scores:**
     -   **Kicking Score (1-10):** A unique score that heavily weights wind, precipitation, and cold to grade the difficulty of the kicking game.
     -   **Passing Score (1-10):** A second score that analyzes wind, precipitation, and extreme temperatures to grade the conditions for the passing game.
+    -   **Rush Advantage (0-10):** Grades how strongly the weather favors the running game over the pass (cold, precipitation, and snow push this higher).
+*   **Wind vs. Field Orientation:** Uses each stadium's long-axis bearing to classify kickoff wind as Along-Field, Diagonal, or Crosswind.
 *   **In-Depth Analysis Tabs:**
     -   **7-Day Outlook:** A summary of the week's forecast with impact ratings for each period.
     -   **Hourly Detail:** A detailed, 48-hour forecast showing how conditions will evolve around kickoff.
-    -   **Game Analysis:** A dedicated view of the conditions before, during, and after a selected game, including the custom Kicking and Passing scores.
+    -   **Game Analysis:** A dedicated view of the conditions before, during, and after a selected game, including the custom Kicking, Passing, and Rush Advantage scores.
     -   **Week Overview:** A master table of every game for a given week, with the ability to filter out games played in domes.
 
 How to Run Locally

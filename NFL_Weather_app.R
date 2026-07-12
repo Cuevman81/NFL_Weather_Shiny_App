@@ -62,6 +62,30 @@ parse_wind_mph <- function(wind_str) {
   num
 }
 
+# Safe aggregations: return NA instead of -Inf/Inf/NaN when everything is missing
+safe_max  <- function(x) { x <- x[!is.na(x)]; if (length(x) == 0) NA_real_ else max(x) }
+safe_min  <- function(x) { x <- x[!is.na(x)]; if (length(x) == 0) NA_real_ else min(x) }
+safe_mean <- function(x) { x <- x[!is.na(x)]; if (length(x) == 0) NA_real_ else mean(x) }
+
+# Single source of truth for the colored status pill used in every forecast table.
+# Vectorized, so it works on a whole column or a single value.
+status_badge <- function(status) {
+  colors <- c(GREEN = "#28a745", YELLOW = "#ffc107", RED = "#dc3545",
+              DOME = "#6f42c1", TBD = "#6c757d")
+  icons  <- c(GREEN = "●", YELLOW = "●", RED = "●",
+              DOME = "\U0001f3df️", TBD = "●")
+  key <- ifelse(status %in% names(colors), status, "TBD")
+  paste0('<span style="color: ', colors[key], '; font-weight: bold;">',
+         icons[key], ' ', key, '</span>')
+}
+
+# Maps a GREEN/YELLOW/RED status to its alert CSS class
+weather_alert_class <- function(status) {
+  switch(status,
+         GREEN = "weather-green", YELLOW = "weather-yellow", RED = "weather-red",
+         "weather-green")
+}
+
 # Function to calculate weather severity index
 calculate_weather_index <- function(temp, wind_speed, precip_chance, forecast_text) {
   # Initialize scores
@@ -280,12 +304,14 @@ get_nws_forecast <- function(lat, lon, hourly = FALSE) {
   user_agent_header <- add_headers("User-Agent" = "NFL Weather App (RodneyJCuevas@gmail.com)")
 
   tryCatch({
-    points_response <- GET(points_url, user_agent_header)
+    # A 12s timeout keeps a slow/throttled NWS response from freezing the
+    # single-threaded R process (which would hang every other output).
+    points_response <- GET(points_url, user_agent_header, timeout(12))
     stop_for_status(points_response, "get gridpoint metadata")
     points_data <- fromJSON(content(points_response, "text", encoding = "UTF-8"), flatten = TRUE)
     forecast_url <- if (hourly) points_data$properties$forecastHourly else points_data$properties$forecast
     if (is.null(forecast_url)) return(data.frame(Status = "Forecast URL not found for this location."))
-    forecast_response <- GET(forecast_url, user_agent_header)
+    forecast_response <- GET(forecast_url, user_agent_header, timeout(12))
     stop_for_status(forecast_response, "get forecast data")
     forecast_data <- fromJSON(content(forecast_response, "text", encoding = "UTF-8"), flatten = TRUE)
     result <- as_tibble(forecast_data$properties$periods)
@@ -396,9 +422,16 @@ ui <- dashboardPage(
     
     # Display selected game info
     uiOutput("selected_game_info"),
-    
+
+    # Manual refresh for live weather (clears the 10-min NWS cache and re-pulls)
+    div(style = "padding: 5px 15px;",
+        actionButton("refresh_weather", "Refresh Weather Data",
+                     icon = icon("sync"), class = "btn-block")),
+    div(style = "padding: 0 15px 5px; font-size: 0.8em; color: #aaa;",
+        textOutput("weather_last_updated")),
+
     hr(),
-    
+
     # Legend
     h4("Impact Legend", style = "padding-left: 15px;"),
     tags$div(style = "padding: 0 15px;",
@@ -422,6 +455,7 @@ ui <- dashboardPage(
   
   dashboardBody(
     tags$head(
+      tags$title("NFL Gameday Weather"),
       tags$style(HTML("
         .content-wrapper, .right-side {
           background-color: #f4f4f4;
@@ -450,7 +484,16 @@ ui <- dashboardPage(
           border: 1px solid #f5c6cb;
           color: #721c24;
         }
-      "))
+      ")),
+      # DataTables inside a tab that is hidden at load render with collapsed
+      # column widths / zero scroll height. When any tab becomes visible, tell
+      # every DataTable to recalculate its layout so the rows show immediately.
+      tags$script(HTML(
+        "$(document).on('shown.bs.tab', function(e) {
+           $($.fn.dataTable.tables(true)).DataTable().columns.adjust();
+           window.dispatchEvent(new Event('resize'));
+         });"
+      ))
     ),
     
     fluidRow(
@@ -476,7 +519,7 @@ ui <- dashboardPage(
           uiOutput("impact_factors"))
     ),
     
-    tabsetPanel(type = "tabs",
+    tabsetPanel(id = "main_tabs", type = "tabs",
                 tabPanel("7-Day Outlook",
                          br(),
                          fluidRow(
@@ -520,7 +563,6 @@ ui <- dashboardPage(
                                # --- THIS CHECKBOX IS NEW ---
                                checkboxInput("hide_domes", "Hide games in domes", value = FALSE),
                                hr(),
-                               # --- THE SPINNER IS ADDED TO THE LINE BELOW ---
                                DT::dataTableOutput("week_overview") %>% withSpinner(type = 6, color = "#004085"))
                          )
                 )
@@ -530,8 +572,20 @@ ui <- dashboardPage(
 
 # 6. DEFINE SERVER LOGIC ----
 server <- function(input, output, session) {
-  
-  
+
+  # Manual weather refresh: clears the shared NWS cache and re-triggers every
+  # weather reactive that takes a dependency on weather_refresh().
+  weather_refresh <- reactiveVal(Sys.time())
+  observeEvent(input$refresh_weather, {
+    keys <- ls(.nws_cache)
+    if (length(keys) > 0) rm(list = keys, envir = .nws_cache)
+    weather_refresh(Sys.time())
+  })
+
+  output$weather_last_updated <- renderText({
+    paste("Weather updated", format(weather_refresh(), "%I:%M %p %Z"))
+  })
+
   # Reactive to determine the current NFL week
   current_nfl_week <- reactive({
     # Find the earliest game that hasn't happened yet using the precise time
@@ -715,13 +769,14 @@ server <- function(input, output, session) {
           # --- END MODIFICATION ---
           
           p(style = "margin: 5px 0; color: #333;",
-            format(game$game_datetime, "%B %d, %Y - %I:%M %p %Z"))
+            format(with_tz(game$game_datetime, game$TimeZone), "%B %d, %Y - %I:%M %p %Z"))
       )
     }
   })
   
   # Reactive: Get REAL-TIME current conditions using riem
   current_conditions <- reactive({
+    weather_refresh()  # re-fetch when the user clicks Refresh Weather Data
     game <- selected_game()
     req(game)
     if (isTRUE(game$Dome)) return(NULL)
@@ -731,6 +786,7 @@ server <- function(input, output, session) {
 
   # Reactive: Daily forecast (skipped for dome games)
   daily_forecast <- reactive({
+    weather_refresh()  # re-fetch when the user clicks Refresh Weather Data
     game <- selected_game()
     req(game)
     if (isTRUE(game$Dome)) return(NULL)
@@ -740,6 +796,7 @@ server <- function(input, output, session) {
 
   # Reactive: Hourly forecast (skipped for dome games)
   hourly_forecast <- reactive({
+    weather_refresh()  # re-fetch when the user clicks Refresh Weather Data
     game <- selected_game()
     req(game)
     if (isTRUE(game$Dome)) return(NULL)
@@ -779,10 +836,7 @@ server <- function(input, output, session) {
         forecast_text = forecast$shortForecast[1]
       )
       
-      alert_class <- switch(index$status,
-                            "GREEN" = "weather-green",
-                            "YELLOW" = "weather-yellow",
-                            "RED" = "weather-red")
+      alert_class <- weather_alert_class(index$status)
       
       # --- THIS IS THE FIX ---
       # Convert the UTC timestamp from riem to the stadium's local timezone
@@ -806,10 +860,7 @@ server <- function(input, output, session) {
         current_forecast$shortForecast
       )
       
-      alert_class <- switch(index$status,
-                            "GREEN" = "weather-green",
-                            "YELLOW" = "weather-yellow",
-                            "RED" = "weather-red")
+      alert_class <- weather_alert_class(index$status)
       
       div(class = paste("weather-alert", alert_class),
           h3(paste(index$icon, "Forecast Status:", index$level)),
@@ -936,6 +987,11 @@ server <- function(input, output, session) {
   
   # Output: Enhanced daily forecast table
   output$daily_forecast_enhanced <- DT::renderDataTable({
+    game <- selected_game()
+    if (!is.null(game) && isTRUE(game$Dome)) {
+      return(DT::datatable(data.frame(Note = "Indoor / dome stadium — weather forecast does not apply."),
+                           options = list(dom = "t"), rownames = FALSE, colnames = ""))
+    }
     forecast <- daily_forecast()
     if ("name" %in% names(forecast)) {
       enhanced_forecast <- forecast %>%
@@ -962,10 +1018,7 @@ server <- function(input, output, session) {
         ) %>%
         mutate(
           `Precip %` = ifelse(is.na(`Precip %`), 0, `Precip %`),
-          Status = paste0('<span style="color: ', 
-                          ifelse(Status == "GREEN", "#28a745",
-                                 ifelse(Status == "YELLOW", "#ffc107", "#dc3545")),
-                          '; font-weight: bold;">● ', Status, '</span>')
+          Status = status_badge(Status)
         )
       
       DT::datatable(enhanced_forecast,
@@ -990,9 +1043,14 @@ server <- function(input, output, session) {
   
   # Output: Enhanced hourly forecast table
   output$hourly_forecast_enhanced <- DT::renderDataTable({
+    input$main_tabs  # re-render when this tab is opened so the DataTable draws in a visible container
     # Requirement: Get the selected game to access its specific timezone
     game <- selected_game()
     req(game) # Ensure a game is selected before proceeding
+    if (isTRUE(game$Dome)) {
+      return(DT::datatable(data.frame(Note = "Indoor / dome stadium — no hourly forecast."),
+                           options = list(dom = "t"), rownames = FALSE, colnames = ""))
+    }
     stadium_tz <- game$TimeZone
     
     forecast <- hourly_forecast()
@@ -1032,18 +1090,14 @@ server <- function(input, output, session) {
         ) %>%
         mutate(
           `Precip %` = ifelse(is.na(`Precip %`), 0, `Precip %`),
-          Status = paste0('<span style="color: ', 
-                          ifelse(Status == "GREEN", "#28a745",
-                                 ifelse(Status == "YELLOW", "#ffc107", "#dc3545")),
-                          '; font-weight: bold;">● ', Status, '</span>')
+          Status = status_badge(Status)
         )
       
       DT::datatable(enhanced_hourly,
                     escape = FALSE,
                     options = list(
-                      pageLength = 24,
-                      scrollY = "400px",
-                      scrollCollapse = TRUE
+                      pageLength = 12,
+                      lengthMenu = c(12, 24, 48)
                     ),
                     rownames = FALSE)
     } else {
@@ -1072,7 +1126,7 @@ server <- function(input, output, session) {
       p(style = "margin: 5px 0 0 0;", 
         "Week ", game$Week, " • ", game$Stadium, ", ", game$City),
       p(style = "margin: 5px 0 0 0; font-size: 0.9em;",
-        em("Estimated: ", format(game$game_datetime, "%B %d, %Y - %I:%M %p")))
+        em("Estimated: ", format(with_tz(game$game_datetime, game$TimeZone), "%B %d, %Y - %I:%M %p %Z")))
     )
     
     if (isTRUE(game$Dome)) {
@@ -1114,14 +1168,14 @@ server <- function(input, output, session) {
     # Pre-game conditions
     pregame <- game_window %>% filter(hours_from_kickoff >= -3 & hours_from_kickoff < 0)
     if (nrow(pregame) > 0) {
-      avg_temp <- round(mean(pregame$temperature, na.rm = TRUE))
-      max_precip <- max(pregame$probabilityOfPrecipitation.value, na.rm = TRUE)
-      
+      avg_temp <- safe_mean(pregame$temperature)
+      max_precip <- safe_max(pregame$probabilityOfPrecipitation.value)
+
       sections$pregame <- div(
         style = "background: #f8f9fa; padding: 15px; margin-bottom: 15px; border-radius: 5px;",
         h4("Pre-Game Conditions (Gates Open to Kickoff)"),
-        p(strong("Average Temperature:"), paste0(avg_temp, "°F")),
-        p(strong("Max Precipitation Chance:"), paste0(max_precip, "%")),
+        p(strong("Average Temperature:"), if (is.na(avg_temp)) "N/A" else paste0(round(avg_temp), "°F")),
+        p(strong("Max Precipitation Chance:"), if (is.na(max_precip)) "N/A" else paste0(max_precip, "%")),
         p(strong("Conditions:"), paste(unique(pregame$shortForecast), collapse = ", "))
       )
     }
@@ -1213,12 +1267,12 @@ server <- function(input, output, session) {
       sections$gametime <- div(
         style = "background: #f8f9fa; padding: 15px; margin-bottom: 15px; border-radius: 5px;",
         h4("During Game (Through Final Whistle)"),
-        p(strong("Temperature Range:"), 
-          paste0(min(gametime$temperature), "°F - ", max(gametime$temperature), "°F")),
+        p(strong("Temperature Range:"),
+          paste0(safe_min(gametime$temperature), "°F - ", safe_max(gametime$temperature), "°F")),
         p(strong("Max Wind:"),
           gametime$windSpeed[which.max(sapply(gametime$windSpeed, parse_wind_mph))]),
-        p(strong("Max Precipitation Chance:"), 
-          paste0(max(gametime$probabilityOfPrecipitation.value, na.rm = TRUE), "%")),
+        p(strong("Max Precipitation Chance:"),
+          {mp <- safe_max(gametime$probabilityOfPrecipitation.value); if (is.na(mp)) "N/A" else paste0(mp, "%")}),
         if (length(worst_factors) > 0) {
           div(
             h5("Critical Factors:", style = "color: #dc3545;"),
@@ -1235,6 +1289,7 @@ server <- function(input, output, session) {
   
   # Reactive: fetch weather for all games in the selected week (memoized on week only)
   week_weather_data <- reactive({
+    weather_refresh()  # re-fetch when the user clicks Refresh Weather Data
     req(input$selected_week)
 
     week_games <- schedule_data %>%
@@ -1289,6 +1344,7 @@ server <- function(input, output, session) {
 
   # Output: Week overview table (toggles dome filter without re-fetching weather)
   output$week_overview <- DT::renderDataTable({
+    input$main_tabs  # re-render when this tab is opened so the DataTable draws in a visible container
     week_data <- week_weather_data()
     if (is.null(week_data)) return(DT::datatable(data.frame(Message = "No games found for this week")))
 
@@ -1312,27 +1368,29 @@ server <- function(input, output, session) {
         mutate(
           `Temp (°F)` = ifelse(is.na(`Temp (°F)`), "N/A", `Temp (°F)`),
           `Precip %` = ifelse(is.na(`Precip %`), "N/A", `Precip %`),
-          Status = case_when(
-            Status == "GREEN"  ~ '<span style="color: #28a745; font-weight: bold;">● GREEN</span>',
-            Status == "YELLOW" ~ '<span style="color: #ffc107; font-weight: bold;">● YELLOW</span>',
-            Status == "RED"    ~ '<span style="color: #dc3545; font-weight: bold;">● RED</span>',
-            Status == "DOME"   ~ '<span style="color: #6f42c1; font-weight: bold;">\U0001f3df️ DOME</span>',
-            TRUE               ~ '<span style="color: #6c757d; font-weight: bold;">● TBD</span>'
-          )
+          Status = status_badge(Status)
         )
 
       DT::datatable(week_weather,
                     escape = FALSE,
                     options = list(
-                      pageLength = 20,
-                      scrollY = "400px",
-                      scrollCollapse = TRUE
+                      pageLength = 16,
+                      lengthMenu = c(16, 32)
                     ),
                     rownames = FALSE)
     } else {
       DT::datatable(data.frame(Message = "No outdoor games for this week"))
     }
   }, server = FALSE)
+
+  # The Hourly Detail and Week Overview DataTables live in tabs that are hidden
+  # at page load. htmlwidgets/DataTables refuse to draw reliably inside a hidden
+  # tab, so leaving these lazy left them stuck on the loading spinner. Rendering
+  # them even while hidden (with the NWS timeouts above ensuring the R process is
+  # never frozen mid-render) lets them draw, and the shown.bs.tab redraw handler
+  # in the UI head adjusts their column widths the moment the tab is opened.
+  outputOptions(output, "hourly_forecast_enhanced", suspendWhenHidden = FALSE)
+  outputOptions(output, "week_overview", suspendWhenHidden = FALSE)
 }
 
 # 7. RUN THE APPLICATION ----
