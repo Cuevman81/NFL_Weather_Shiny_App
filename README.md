@@ -14,7 +14,8 @@ Key Features
 
 *   **Interactive Filtering:** View the entire 2026 NFL schedule by Week, Stadium, Team, or a specific Date.
 *   **Dynamic UI:** The interface updates intelligently based on your selections to show you the most relevant games.
-*   **Live Weather Data:** Utilizes the National Weather Service (NWS) API for up-to-date daily and hourly forecast information, plus real-time ASOS observations via the `riem` package. A **Refresh Weather Data** button clears the cache and re-pulls the latest conditions on demand.
+*   **Kickoff-Based Conditions:** The headline temperature, wind, and precipitation figures describe the forecast period that actually covers kickoff — not whatever the weather happens to be doing at the venue right now. When a game is still beyond the forecast horizon, the dashboard says so plainly and falls back to current venue conditions rather than passing them off as the game forecast.
+*   **Live Weather Data:** Utilizes the National Weather Service (NWS) API for up-to-date daily and hourly forecast information, plus real-time ASOS observations from the Iowa Environmental Mesonet. A **Refresh Weather Data** button clears the cache and re-pulls the latest conditions on demand.
 *   **Game Impact Assessment:** A color-coded system (Green, Yellow, Red) provides an immediate sense of the potential for weather to disrupt a game.
 *   **Custom Gameplay Scores:**
     -   **Kicking Score (1-10):** A unique score that heavily weights wind, precipitation, and cold to grade the difficulty of the kicking game.
@@ -47,7 +48,7 @@ Open your terminal or command prompt and clone this repository to your local mac
 Open the `NFL_Weather_app.R` file in RStudio. In the RStudio console, run the following command to install all the necessary packages:
 
     ```r
-    install.packages(c("shiny", "shinydashboard", "dplyr", "httr", "jsonlite", "lubridate", "DT", "here", "riem", "shinycssloaders"))
+    install.packages(c("shiny", "shinydashboard", "dplyr", "httr", "jsonlite", "lubridate", "DT", "here", "shinycssloaders"))
     ```
 
 3. **Run the Application**
@@ -59,7 +60,7 @@ Data Sources
 This application relies on the following sources for its data:
 
 *   **Weather Forecasts:** National Weather Service (NWS) API (https://www.weather.gov/documentation/services-web-api) for all forecast data.
-*   **Real-Time Conditions:** The `riem` R package, which pulls METAR data from the Iowa Environmental Mesonet. *(Note: Real-time data may be unavailable when deployed on some servers due to network policies.)*
+*   **Real-Time Conditions:** ASOS/METAR observations from the Iowa Environmental Mesonet (https://mesonet.agron.iastate.edu/), requested directly so the call can be given a hard timeout. *(Note: Real-time data may be unavailable when deployed on some servers due to network policies.)*
 *   **Schedule Data:** The `nfl_schedule_2026_detailed.csv` file included in this repository.
 
 Contact

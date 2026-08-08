@@ -9,7 +9,6 @@ library(jsonlite)
 library(lubridate)
 library(DT)
 library(here)
-library(riem)
 library(shinycssloaders)
 
 
@@ -38,6 +37,11 @@ tryCatch({
   schedule_data <- bind_rows(lapply(split(schedule_data, schedule_data$TimeZone), function(grp) {
     tz <- grp$TimeZone[1]
     grp$game_datetime <- with_tz(grp$game_datetime_et, tzone = tz)
+    # The calendar date the game is played on IN ITS OWN TIMEZONE. bind_rows
+    # collapses the per-group tzone attribute below, after which as.Date() on
+    # game_datetime silently falls back to UTC and rolls night games to the next
+    # day. Computing it here, while tz is still correct, is the only safe point.
+    grp$game_date <- as.Date(format(grp$game_datetime, "%Y-%m-%d"))
     grp$game_label <- paste0(
       format(grp$game_datetime, "%b %d"), " - ",
       grp$Away_Team, " @ ", grp$Home_Team, " (",
@@ -46,7 +50,12 @@ tryCatch({
     grp
   })) %>%
     arrange(game_datetime)
-  
+
+  # First date that still has games. Used as the date picker's default so the
+  # app never opens on an empty day during the offseason.
+  upcoming <- schedule_data$game_date[schedule_data$game_datetime >= Sys.time()]
+  next_game_date <- if (length(upcoming) > 0) min(upcoming) else Sys.Date()
+
 }, error = function(e) {
   stop(paste("Error processing schedule data:", conditionMessage(e)))
 })
@@ -55,7 +64,9 @@ tryCatch({
 
 # Parses NWS wind strings like "15 mph", "10 to 20 mph", "Calm" → numeric mph
 parse_wind_mph <- function(wind_str) {
-  if (is.null(wind_str) || is.na(wind_str) || wind_str == "" ||
+  if (is.null(wind_str) || length(wind_str) == 0) return(0)
+  wind_str <- as.character(wind_str)[1]  # NWS sends strings, ASOS sends numerics
+  if (is.na(wind_str) || wind_str == "" ||
       tolower(trimws(wind_str)) == "calm") return(0)
   num <- suppressWarnings(as.numeric(gsub("[^0-9]", "", strsplit(wind_str, " to ")[[1]][1])))
   if (is.na(num)) return(0)
@@ -285,11 +296,17 @@ calculate_rushing_score <- function(temp, precip_chance, forecast_text) {
 # 10-minute cache keyed on "lat,lon_d" or "lat,lon_h" — shared across sessions on the same R process
 .nws_cache <- new.env(parent = emptyenv())
 
-get_nws_forecast <- function(lat, lon, hourly = FALSE) {
+get_nws_forecast <- function(lat, lon, hourly = FALSE, station = NULL) {
   if (length(lat) != 1 || length(lon) != 1 || is.na(lat) || is.na(lon)) {
     return(data.frame(Status = "Invalid or missing stadium coordinates provided."))
   }
-  # NWS API only covers the US/territories (roughly lat 18-72, lon -180 to -60)
+  # The ICAO prefix is the reliable coverage test: a lat/lon box cannot separate
+  # Monterrey (25.7N, -100.3) from south Texas, and NWS 404s on Mexican venues.
+  # Every US station starts with "K"; international ones do not.
+  if (!is.null(station) && !is.na(station) && !grepl("^K", station)) {
+    return(data.frame(Status = "Location is outside NWS coverage (international venue)."))
+  }
+  # Backstop for callers that don't pass a station (lat 18-72, lon -180 to -60)
   if (lat < 17 || lat > 72 || lon < -180 || lon > -60) {
     return(data.frame(Status = "Location is outside NWS coverage (international venue)."))
   }
@@ -326,21 +343,77 @@ get_nws_forecast <- function(lat, lon, hourly = FALSE) {
   })
 }
 
-# Function to get REAL-TIME conditions using the riem package
-get_riem_current_conditions <- function(station_code) {
-  if (is.na(station_code) || !grepl("^K", station_code)) {
-    # riem/NWS only cover US ASOS stations (ICAO prefix "K")
+# Latest ASOS observation, pulled straight from the Iowa Environmental Mesonet.
+# The riem package wraps this same CSV service, but it is built on httr2 and sets
+# no timeout anywhere in its namespace — a stalled request would freeze the
+# single-threaded R process exactly the way the NWS calls used to. Calling the
+# endpoint directly is what lets us bound it. The columns we depend on
+# (station / valid / tmpf / sknt) are named the same as riem's output.
+get_current_observations <- function(station_code) {
+  if (is.null(station_code) || is.na(station_code) || !grepl("^K", station_code)) {
+    # NWS/ASOS only cover US stations (ICAO prefix "K")
     return(NULL)
   }
 
+  # IEM rate-limits (HTTP 429) and every viewer of the deployed app shares one
+  # outbound IP, so observations get the same short cache the forecasts do.
+  # ASOS stations report roughly hourly, so 5 minutes costs no freshness.
+  cache_key <- paste0("obs_", station_code)
+  cached <- .nws_cache[[cache_key]]
+  if (!is.null(cached) && as.numeric(difftime(Sys.time(), cached$time, units = "mins")) < 5) {
+    return(cached$data)
+  }
+
   tryCatch({
-    obs <- riem_measures(station = station_code, date_start = Sys.Date())
-    if (nrow(obs) > 0) return(slice_tail(obs, n = 1))
-    return(NULL)
+    # Yesterday through tomorrow in UTC, so a late local kickoff (or a station
+    # that reports sparsely) still has observations in range.
+    from <- Sys.Date() - 1
+    to   <- Sys.Date() + 1
+    resp <- GET(
+      "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py",
+      query = list(
+        station = station_code, data = "tmpf,sknt,drct",
+        year1 = year(from), month1 = month(from), day1 = day(from),
+        year2 = year(to),   month2 = month(to),   day2 = day(to),
+        tz = "UTC", format = "onlycomma", latlon = "no",
+        missing = "M", trace = "T", direct = "no",
+        report_type = "3", report_type = "4"
+      ),
+      timeout(12)
+    )
+    stop_for_status(resp, "get ASOS observations")
+
+    obs <- read.csv(text = content(resp, "text", encoding = "UTF-8"),
+                    stringsAsFactors = FALSE, na.strings = c("M", "", "T"))
+    if (nrow(obs) == 0 || !"tmpf" %in% names(obs)) return(NULL)
+
+    obs <- obs[!is.na(obs$tmpf), , drop = FALSE]
+    if (nrow(obs) == 0) return(NULL)
+
+    # IEM stamps observations as "YYYY-MM-DD HH:MM" in UTC
+    obs$valid <- ymd_hm(obs$valid, tz = "UTC", quiet = TRUE)
+    latest <- obs[nrow(obs), , drop = FALSE]
+    .nws_cache[[cache_key]] <- list(time = Sys.time(), data = latest)
+    latest
   }, error = function(e) {
-    message(paste("riem error for station", station_code, ":", e$message))
+    message(paste("ASOS error for station", station_code, ":", e$message))
     return(NULL)
   })
+}
+
+# Returns the single forecast period covering `target_time`, or NULL if the
+# target falls outside the forecast's range. Works on both the hourly feed
+# (1-hour periods) and the daily feed (12-hour day/night periods).
+find_period_for_time <- function(forecast, target_time) {
+  if (is.null(forecast) || !"startTime" %in% names(forecast) ||
+      !"endTime" %in% names(forecast) || nrow(forecast) == 0) return(NULL)
+  hit <- forecast %>%
+    mutate(.start = ymd_hms(startTime, quiet = TRUE),
+           .end   = ymd_hms(endTime,   quiet = TRUE)) %>%
+    filter(!is.na(.start), !is.na(.end),
+           target_time >= .start, target_time < .end) %>%
+    slice(1)
+  if (nrow(hit) == 0) NULL else hit
 }
 
 # Converts NWS compass direction string ("SW", "NNE", etc.) to degrees (0-359)
@@ -368,6 +441,9 @@ get_wind_field_relationship <- function(wind_dir_str, field_orientation) {
 
 # 5. DEFINE USER INTERFACE ----
 ui <- dashboardPage(
+  # `title` here is what actually sets the browser tab; a tags$title() in the
+  # body head gets overridden by dashboardPage.
+  title = "NFL Gameday Weather",
   dashboardHeader(title = "NFL Stadium Weather Command Center"),
   
   dashboardSidebar(
@@ -414,9 +490,11 @@ ui <- dashboardPage(
       condition = "input.selection_method == 'date'",
       dateInput("selected_date",
                 "Select Date:",
-                value = Sys.Date(),
+                # Open on the next date that actually has games — outside the
+                # season "today" is always an empty result.
+                value = next_game_date,
                 min = Sys.Date(),
-                max = max(schedule_data$game_datetime)),
+                max = max(as.Date(schedule_data$game_datetime))),
       uiOutput("date_games_selector")
     ),
     
@@ -455,7 +533,6 @@ ui <- dashboardPage(
   
   dashboardBody(
     tags$head(
-      tags$title("NFL Gameday Weather"),
       tags$style(HTML("
         .content-wrapper, .right-side {
           background-color: #f4f4f4;
@@ -488,9 +565,20 @@ ui <- dashboardPage(
       # DataTables inside a tab that is hidden at load render with collapsed
       # column widths / zero scroll height. When any tab becomes visible, tell
       # every DataTable to recalculate its layout so the rows show immediately.
+      # The guards matter: this event also fires during page init, before DT's
+      # JS has registered $.fn.dataTable. Throwing there aborts Shiny's client
+      # message pipeline and every lazily-rendered output stays stuck on its
+      # spinner forever.
       tags$script(HTML(
         "$(document).on('shown.bs.tab', function(e) {
-           $($.fn.dataTable.tables(true)).DataTable().columns.adjust();
+           try {
+             if ($.fn && $.fn.dataTable && $.fn.dataTable.tables) {
+               var t = $.fn.dataTable.tables(true);
+               if (t.length) $(t).DataTable().columns.adjust();
+             }
+           } catch (err) {
+             if (window.console) console.warn('DataTable adjust skipped:', err);
+           }
            window.dispatchEvent(new Event('resize'));
          });"
       ))
@@ -560,7 +648,7 @@ ui <- dashboardPage(
                                title = "All Games This Week - Weather Status",
                                status = "info",
                                solidHeader = TRUE,
-                               # --- THIS CHECKBOX IS NEW ---
+                               h4(textOutput("week_overview_label"), style = "margin-top: 0;"),
                                checkboxInput("hide_domes", "Hide games in domes", value = FALSE),
                                hr(),
                                DT::dataTableOutput("week_overview") %>% withSpinner(type = 6, color = "#004085"))
@@ -622,7 +710,8 @@ server <- function(input, output, session) {
       Stadium = game$Stadium,
       City = game$City,
       Latitude = game$Latitude,
-      Longitude = game$Longitude
+      Longitude = game$Longitude,
+      Station_ICAO = game$Station_ICAO
     ))
   })
   
@@ -632,7 +721,7 @@ server <- function(input, output, session) {
     games <- schedule_data %>%
       filter(
         Stadium == input$selected_stadium,
-        as.Date(game_datetime) >= Sys.Date() # Filter for upcoming games here
+        game_date >= Sys.Date() # Filter for upcoming games here
       ) %>%
       arrange(game_datetime)
     
@@ -688,7 +777,7 @@ server <- function(input, output, session) {
     games <- schedule_data %>%
       filter(
         (Home_Team == input$selected_team | Away_Team == input$selected_team),
-        as.Date(game_datetime) >= Sys.Date() # Filter for upcoming games here
+        game_date >= Sys.Date() # Filter for upcoming games here
       ) %>%
       arrange(game_datetime)
     
@@ -707,7 +796,7 @@ server <- function(input, output, session) {
   output$date_games_selector <- renderUI({
     req(input$selected_date) # <-- ADD THIS LINE
     games <- schedule_data %>%
-      filter(as.Date(game_datetime) == input$selected_date) %>%
+      filter(game_date == input$selected_date) %>%
       arrange(game_datetime)
     
     if (nrow(games) > 0) {
@@ -781,7 +870,7 @@ server <- function(input, output, session) {
     req(game)
     if (isTRUE(game$Dome)) return(NULL)
     req(game$Station_ICAO)
-    get_riem_current_conditions(game$Station_ICAO)
+    get_current_observations(game$Station_ICAO)
   })
 
   # Reactive: Daily forecast (skipped for dome games)
@@ -791,7 +880,8 @@ server <- function(input, output, session) {
     req(game)
     if (isTRUE(game$Dome)) return(NULL)
     stadium <- current_stadium_info()
-    get_nws_forecast(stadium$Latitude, stadium$Longitude, hourly = FALSE)
+    get_nws_forecast(stadium$Latitude, stadium$Longitude, hourly = FALSE,
+                     station = stadium$Station_ICAO)
   })
 
   # Reactive: Hourly forecast (skipped for dome games)
@@ -801,9 +891,72 @@ server <- function(input, output, session) {
     req(game)
     if (isTRUE(game$Dome)) return(NULL)
     stadium <- current_stadium_info()
-    get_nws_forecast(stadium$Latitude, stadium$Longitude, hourly = TRUE)
+    get_nws_forecast(stadium$Latitude, stadium$Longitude, hourly = TRUE,
+                     station = stadium$Station_ICAO)
   })
   
+  # Reactive: the forecast period that actually covers kickoff, or NULL when the
+  # game is past / beyond the forecast horizon. Hourly is preferred (1-hour
+  # resolution, ~6 days out); the 12-hour daily periods extend the reach.
+  kickoff_forecast <- reactive({
+    game <- selected_game()
+    req(game)
+    if (isTRUE(game$Dome)) return(NULL)
+    kick <- game$game_datetime
+
+    hit <- find_period_for_time(hourly_forecast(), kick)
+    if (!is.null(hit)) return(list(period = hit, resolution = "hourly"))
+
+    hit <- find_period_for_time(daily_forecast(), kick)
+    if (!is.null(hit)) return(list(period = hit, resolution = "daily"))
+
+    NULL
+  })
+
+  # Single source of truth for the headline alert + value boxes. This app is
+  # about GAME weather, so kickoff conditions win whenever the game is inside
+  # the forecast horizon; live conditions at the venue are the labeled fallback
+  # for games still weeks out.
+  display_conditions <- reactive({
+    game <- selected_game()
+    req(game)
+    if (isTRUE(game$Dome)) return(NULL)
+
+    kf <- kickoff_forecast()
+    if (!is.null(kf)) {
+      p <- kf$period
+      return(list(
+        scope      = "kickoff",
+        prefix     = "Kickoff",
+        temp       = p$temperature[1],
+        wind       = p$windSpeed[1],
+        wind_dir   = p$windDirection[1],
+        precip     = p$probabilityOfPrecipitation.value[1],
+        conditions = p$shortForecast[1],
+        resolution = kf$resolution
+      ))
+    }
+
+    forecast <- daily_forecast()
+    has_fc   <- "temperature" %in% names(forecast) && nrow(forecast) > 0
+    obs      <- current_conditions()
+    has_obs  <- !is.null(obs) && "tmpf" %in% names(obs) && !is.na(obs$tmpf)
+    if (!has_fc && !has_obs) return(NULL)
+
+    list(
+      scope      = "current",
+      prefix     = "Current",
+      temp       = if (has_obs) obs$tmpf else forecast$temperature[1],
+      wind       = if (has_obs) paste(round(obs$sknt * 1.15078), "mph")
+                   else if (has_fc) forecast$windSpeed[1] else "N/A",
+      wind_dir   = if (has_obs) "" else if (has_fc) forecast$windDirection[1] else "",
+      precip     = if (has_fc) forecast$probabilityOfPrecipitation.value[1] else NA,
+      conditions = if (has_fc) forecast$shortForecast[1] else NA_character_,
+      station    = if (has_obs) obs$station else NA_character_,
+      obs_time   = if (has_obs) obs$valid else NULL
+    )
+  })
+
   # Output: Stadium and city name
   output$stadium_city_name <- renderText({
     stadium <- current_stadium_info()
@@ -822,53 +975,41 @@ server <- function(input, output, session) {
                  p("Weather conditions have no impact on game play.")))
     }
 
-    # Get all necessary data
-    conditions <- current_conditions()
-    forecast <- daily_forecast()
-    
-    # --- Priority 1: Use Real-Time Data if Available ---
-    if (!is.null(conditions) && "tmpf" %in% names(conditions)) {
-      
-      index <- calculate_weather_index(
-        temp = conditions$tmpf,
-        wind_speed = paste(round(conditions$sknt * 1.15078), "mph"),
-        precip_chance = forecast$probabilityOfPrecipitation.value[1],
-        forecast_text = forecast$shortForecast[1]
-      )
-      
-      alert_class <- weather_alert_class(index$status)
-      
-      # --- THIS IS THE FIX ---
-      # Convert the UTC timestamp from riem to the stadium's local timezone
-      local_obs_time <- with_tz(conditions$valid, tzone = game$TimeZone)
-      
-      div(class = paste("weather-alert", alert_class),
-          h3(paste(index$icon, "Current Status:", index$level)),
-          p(index$description),
-          p(strong("Source Station:"), conditions$station),
-          # Display the newly converted local time
-          p(strong("Observation Time:"), format(local_obs_time, "%I:%M %p %Z"))
-      )
-      
-      # --- Fallback: Use NWS Forecast if No Real-Time Data ---
-    } else if ("temperature" %in% names(forecast) && nrow(forecast) > 0) {
-      current_forecast <- forecast[1, ]
-      index <- calculate_weather_index(
-        current_forecast$temperature,
-        current_forecast$windSpeed,
-        current_forecast$probabilityOfPrecipitation.value,
-        current_forecast$shortForecast
-      )
-      
-      alert_class <- weather_alert_class(index$status)
-      
-      div(class = paste("weather-alert", alert_class),
-          h3(paste(index$icon, "Forecast Status:", index$level)),
-          p(index$description),
-          p(strong("Period:"), current_forecast$name),
-          p(strong("Conditions:"), current_forecast$shortForecast)
-      )
+    dc <- display_conditions()
+    if (is.null(dc)) return(NULL)
+
+    index <- calculate_weather_index(dc$temp, dc$wind, dc$precip, dc$conditions)
+    alert_class <- weather_alert_class(index$status)
+
+    if (identical(dc$scope, "kickoff")) {
+      return(div(class = paste("weather-alert", alert_class),
+                 h3(paste(index$icon, "Kickoff Forecast:", index$level)),
+                 p(index$description),
+                 p(strong("Conditions:"), dc$conditions),
+                 p(strong("Kickoff:"),
+                   format(with_tz(game$game_datetime, game$TimeZone),
+                          "%a %b %d, %I:%M %p %Z"))))
     }
+
+    # No kickoff forecast available — say why rather than passing off today's
+    # weather at the venue as if it were the game's.
+    days_out <- as.numeric(difftime(game$game_datetime, Sys.time(), units = "days"))
+    note <- if (days_out < 0) {
+      "This game has already kicked off or been played — showing conditions at the venue now."
+    } else {
+      paste0("Kickoff is about ", max(1, round(days_out)),
+             " days out, beyond the NWS forecast range. Showing conditions at the venue now — ",
+             "check back within a week of the game for a kickoff forecast.")
+    }
+
+    div(class = paste("weather-alert", alert_class),
+        h3(paste(index$icon, "Current Conditions at Venue:", index$level)),
+        p(note),
+        if (!is.na(dc$station)) p(strong("Source Station:"), dc$station),
+        if (!is.null(dc$obs_time))
+          p(strong("Observation Time:"),
+            format(with_tz(dc$obs_time, tzone = game$TimeZone), "%I:%M %p %Z"))
+    )
   })
   
   # Output: Temperature box (now using REAL-TIME data with a forecast fallback)
@@ -877,33 +1018,18 @@ server <- function(input, output, session) {
     if (!is.null(game) && isTRUE(game$Dome)) {
       return(valueBox("Indoor", "Dome Stadium", icon = icon("building"), color = "purple"))
     }
-    conditions <- current_conditions()
-    forecast <- daily_forecast()
-
-    if (!is.null(conditions) && !is.na(conditions$tmpf)) {
-      # --- Priority 1: Use Real-Time Data if available ---
-      temp <- conditions$tmpf
-      color <- if (temp < 32 || temp > 85) "red" else if (temp < 40 || temp > 75) "yellow" else "green"
-      valueBox(
-        paste0(temp, "°F"),
-        "Current Temperature",
-        icon = icon("thermometer-half"),
-        color = color
-      )
-    } else if ("temperature" %in% names(forecast) && nrow(forecast) > 0) {
-      # --- Priority 2: Use Forecast Data if real-time fails ---
-      temp <- forecast$temperature[1]
-      color <- if (temp < 32 || temp > 85) "red" else if (temp < 40 || temp > 75) "yellow" else "green"
-      valueBox(
-        paste0(temp, "°F"),
-        "Forecasted Temp", # The label is changed to be more accurate
-        icon = icon("thermometer-half"),
-        color = color
-      )
-    } else {
-      # --- Final Fallback if everything fails ---
-      valueBox("N/A", "Temperature", icon = icon("thermometer-half"))
+    dc <- display_conditions()
+    if (is.null(dc) || is.na(dc$temp)) {
+      return(valueBox("N/A", "Temperature", icon = icon("thermometer-half")))
     }
+    temp <- dc$temp
+    color <- if (temp < 32 || temp > 85) "red" else if (temp < 40 || temp > 75) "yellow" else "green"
+    valueBox(
+      paste0(temp, "°F"),
+      paste(dc$prefix, "Temperature"),
+      icon = icon("thermometer-half"),
+      color = color
+    )
   })
   
   # Output: Wind box (now using REAL-TIME data)
@@ -912,23 +1038,19 @@ server <- function(input, output, session) {
     if (!is.null(game) && isTRUE(game$Dome)) {
       return(valueBox("N/A", "Dome Stadium", icon = icon("wind"), color = "purple"))
     }
-    forecast <- daily_forecast()
-    if ("windSpeed" %in% names(forecast) && nrow(forecast) > 0) {
-      wind_speed_val <- forecast$windSpeed[1]
-      wind_dir <- forecast$windDirection[1]
-
-      wind_mph_num <- parse_wind_mph(wind_speed_val)
-      color <- if (wind_mph_num >= 20) "red" else if (wind_mph_num >= 15) "yellow" else "green"
-
-      valueBox(
-        paste(wind_speed_val, wind_dir),
-        "Forecasted Wind",
-        icon = icon("wind"),
-        color = color
-      )
-    } else {
-      valueBox("N/A", "Current Wind", icon = icon("wind"))
+    dc <- display_conditions()
+    if (is.null(dc) || identical(dc$wind, "N/A")) {
+      return(valueBox("N/A", "Wind", icon = icon("wind")))
     }
+    wind_mph_num <- parse_wind_mph(dc$wind)
+    color <- if (wind_mph_num >= 20) "red" else if (wind_mph_num >= 15) "yellow" else "green"
+
+    valueBox(
+      trimws(paste(dc$wind, dc$wind_dir)),
+      paste(dc$prefix, "Wind"),
+      icon = icon("wind"),
+      color = color
+    )
   })
   
   # Output: Precipitation box
@@ -937,21 +1059,19 @@ server <- function(input, output, session) {
     if (!is.null(game) && isTRUE(game$Dome)) {
       return(valueBox("N/A", "Dome Stadium", icon = icon("cloud-rain"), color = "purple"))
     }
-    forecast <- daily_forecast()
-    if ("probabilityOfPrecipitation.value" %in% names(forecast) && nrow(forecast) > 0) {
-      precip <- forecast$probabilityOfPrecipitation.value[1]
-      precip_val <- ifelse(is.na(precip), 0, precip)
-      color <- if (precip_val >= 70) "red" else if (precip_val >= 50) "yellow" else "green"
-      
-      valueBox(
-        paste0(precip_val, "%"),
-        "Precipitation Chance",
-        icon = icon("cloud-rain"),
-        color = color
-      )
-    } else {
-      valueBox("0%", "Precipitation Chance", icon = icon("cloud-rain"))
+    dc <- display_conditions()
+    if (is.null(dc)) {
+      return(valueBox("N/A", "Precipitation Chance", icon = icon("cloud-rain")))
     }
+    precip_val <- ifelse(is.na(dc$precip), 0, dc$precip)
+    color <- if (precip_val >= 70) "red" else if (precip_val >= 50) "yellow" else "green"
+
+    valueBox(
+      paste0(precip_val, "%"),
+      paste(dc$prefix, "Precip Chance"),
+      icon = icon("cloud-rain"),
+      color = color
+    )
   })
   
   # Output: Impact factors
@@ -961,28 +1081,31 @@ server <- function(input, output, session) {
       return(p("No weather impact factors — this game is played in a controlled indoor environment.",
                style = "color: #6f42c1; font-weight: bold;"))
     }
-    forecast <- daily_forecast()
-    if ("temperature" %in% names(forecast) && nrow(forecast) > 0) {
-      current <- forecast[1,]
-      factors <- get_impact_factors(
-        current$temperature,
-        current$windSpeed,
-        current$probabilityOfPrecipitation.value,
-        current$shortForecast
-      )
-      
+    dc <- display_conditions()
+    if (is.null(dc)) return(NULL)
+
+    factors <- get_impact_factors(dc$temp, dc$wind, dc$precip, dc$conditions)
+
+    scope_note <- if (identical(dc$scope, "kickoff")) {
+      "Based on the forecast period covering kickoff."
+    } else {
+      "Based on conditions at the venue now — kickoff is outside the forecast range."
+    }
+
+    tagList(
+      p(em(scope_note), style = "color: #666; font-size: 0.9em; margin-bottom: 10px;"),
       if (length(factors) > 0) {
         tags$ul(
           lapply(names(factors), function(name) {
-            tags$li(strong(paste0(toupper(substring(name, 1, 1)), substring(name, 2), ":")), 
+            tags$li(strong(paste0(toupper(substring(name, 1, 1)), substring(name, 2), ":")),
                     factors[[name]])
           })
         )
       } else {
-        p("No significant weather factors detected for game impact.", 
+        p("No significant weather factors detected for game impact.",
           style = "color: green; font-weight: bold;")
       }
-    }
+    )
   })
   
   # Output: Enhanced daily forecast table
@@ -1288,25 +1411,44 @@ server <- function(input, output, session) {
   })
   
   # Reactive: fetch weather for all games in the selected week (memoized on week only)
+  # Which week the overview tab describes. In Week mode that's the sidebar
+  # dropdown; in Stadium/Team/Date mode it follows the game you actually have
+  # selected, so the tab can't silently show a different week than the rest of
+  # the dashboard.
+  overview_week <- reactive({
+    if (identical(input$selection_method, "week")) {
+      req(input$selected_week)
+      as.numeric(input$selected_week)
+    } else {
+      game <- selected_game()
+      req(game)
+      as.numeric(game$Week)
+    }
+  })
+
+  output$week_overview_label <- renderText({
+    paste("Week", overview_week())
+  })
+
   week_weather_data <- reactive({
     weather_refresh()  # re-fetch when the user clicks Refresh Weather Data
-    req(input$selected_week)
+    sel_week <- overview_week()
 
     week_games <- schedule_data %>%
-      filter(Week == as.numeric(input$selected_week))
+      filter(Week == sel_week)
 
     if (nrow(week_games) == 0) return(NULL)
 
     week_games %>%
       rowwise() %>%
       mutate(
-        is_in_forecast_window = as.Date(game_datetime) >= Sys.Date() &&
-          as.Date(game_datetime) <= (Sys.Date() + 7),
+        is_in_forecast_window = game_date >= Sys.Date() &&
+          game_date <= (Sys.Date() + 7),
 
         forecast_data = if (Dome) {
           list(NULL)
         } else if (is_in_forecast_window) {
-          list(get_nws_forecast(Latitude, Longitude, hourly = FALSE))
+          list(get_nws_forecast(Latitude, Longitude, hourly = FALSE, station = Station_ICAO))
         } else {
           list(NULL)
         },
@@ -1344,7 +1486,11 @@ server <- function(input, output, session) {
 
   # Output: Week overview table (toggles dome filter without re-fetching weather)
   output$week_overview <- DT::renderDataTable({
-    input$main_tabs  # re-render when this tab is opened so the DataTable draws in a visible container
+    # This table fetches a forecast for every stadium playing that week (up to 16
+    # sequential NWS round trips). Gate it on the tab actually being open so a
+    # page load never pays that cost, and so the fetch re-runs in a visible
+    # container once the user gets here.
+    req(identical(input$main_tabs, "Week Overview"))
     week_data <- week_weather_data()
     if (is.null(week_data)) return(DT::datatable(data.frame(Message = "No games found for this week")))
 
@@ -1383,14 +1529,16 @@ server <- function(input, output, session) {
     }
   }, server = FALSE)
 
-  # The Hourly Detail and Week Overview DataTables live in tabs that are hidden
-  # at page load. htmlwidgets/DataTables refuse to draw reliably inside a hidden
-  # tab, so leaving these lazy left them stuck on the loading spinner. Rendering
-  # them even while hidden (with the NWS timeouts above ensuring the R process is
-  # never frozen mid-render) lets them draw, and the shown.bs.tab redraw handler
-  # in the UI head adjusts their column widths the moment the tab is opened.
+  # Every output below lives in a tab that is hidden at page load, and each is
+  # wrapped in withSpinner(). withSpinner() hides the real output element while
+  # the spinner shows, which Shiny's default suspendWhenHidden reads as "not
+  # visible" — so the output is suspended, never computes, and the spinner spins
+  # forever. Opting out of suspension is what breaks that deadlock. (week_overview
+  # still defers its expensive multi-stadium fetch via the req() on its tab above.)
   outputOptions(output, "hourly_forecast_enhanced", suspendWhenHidden = FALSE)
-  outputOptions(output, "week_overview", suspendWhenHidden = FALSE)
+  outputOptions(output, "gameday_analysis",         suspendWhenHidden = FALSE)
+  outputOptions(output, "week_overview",            suspendWhenHidden = FALSE)
+  outputOptions(output, "week_overview_label",      suspendWhenHidden = FALSE)
 }
 
 # 7. RUN THE APPLICATION ----
