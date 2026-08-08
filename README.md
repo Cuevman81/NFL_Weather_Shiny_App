@@ -3,7 +3,7 @@ NFL Weather RShiny App (2026 Season)
 
 **Live Application:** [Experience the NFL Weather Dashboard on ShinyApps](https://rcuevas.shinyapps.io/NFL_Weather/)
 
-An interactive R Shiny dashboard providing detailed weather forecasts and game-day impact analysis for the 2026 NFL regular season and playoffs.
+An interactive R Shiny dashboard providing detailed weather forecasts and game-day impact analysis for the 2026 NFL regular season — all 272 games across Weeks 1–18.
 
 This application is built for football fans, fantasy players, and analysts who want to understand how weather conditions will affect game day. It moves beyond a simple forecast by providing custom, data-driven scores for specific gameplay elements and a clear, at-a-glance impact assessment for every game in the 2026 season.
 
@@ -26,7 +26,8 @@ Key Features
     -   **7-Day Outlook:** A summary of the week's forecast with impact ratings for each period.
     -   **Hourly Detail:** A detailed, 48-hour forecast showing how conditions will evolve around kickoff.
     -   **Game Analysis:** A dedicated view of the conditions before, during, and after a selected game, including the custom Kicking, Passing, and Rush Advantage scores.
-    -   **Week Overview:** A master table of every game for a given week, with the ability to filter out games played in domes.
+    -   **Week Overview:** A master table of every game for a given week, with the ability to filter out games played in domes. It follows whichever game you have selected, so it always describes the same week as the rest of the dashboard.
+*   **Domes and International Venues Handled Explicitly:** Indoor stadiums are flagged and skip weather lookups entirely. The 2026 slate includes eight games outside the United States (Melbourne, Rio de Janeiro, London ×2, Paris, Madrid, Munich, and Monterrey); these sit outside National Weather Service coverage and are labelled as such instead of showing a misleading forecast.
 
 How to Run Locally
 ------------------
@@ -60,8 +61,23 @@ Data Sources
 This application relies on the following sources for its data:
 
 *   **Weather Forecasts:** National Weather Service (NWS) API (https://www.weather.gov/documentation/services-web-api) for all forecast data.
-*   **Real-Time Conditions:** ASOS/METAR observations from the Iowa Environmental Mesonet (https://mesonet.agron.iastate.edu/), requested directly so the call can be given a hard timeout. *(Note: Real-time data may be unavailable when deployed on some servers due to network policies.)*
+*   **Real-Time Conditions:** ASOS/METAR observations from the Iowa Environmental Mesonet (https://mesonet.agron.iastate.edu/), requested directly so the call can be given a hard timeout. Verified working from the live shinyapps.io deployment; if a station is unreachable the dashboard falls back to the NWS forecast rather than failing.
 *   **Schedule Data:** The `nfl_schedule_2026_detailed.csv` file included in this repository.
+
+Both sources are cached in-process — forecasts for 10 minutes, observations for 5 — so repeated views of the same venue don't re-hit the APIs. Every outbound request has a 12-second timeout.
+
+Repository Contents
+-------------------
+
+| File | Role |
+|---|---|
+| `NFL_Weather_app.R` | The weather dashboard — this is the deployed app |
+| `NFL_Schedule_Explorer.R` | Companion season-overview app, run locally |
+| `NFL_Weather_CSV_Creater_2026.R` | Builds the detailed schedule; holds the stadium dictionary (coordinates, timezone, ICAO station, surface, dome status, field orientation) |
+| `nfl_schedule_2026.csv` | Base schedule — input to the builder |
+| `nfl_schedule_2026_detailed.csv` | Builder output — read by both apps |
+
+Only `NFL_Weather_app.R` and `nfl_schedule_2026_detailed.csv` are deployed. When games change, edit `nfl_schedule_2026.csv` and re-run the builder.
 
 Contact
 -------
