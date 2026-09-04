@@ -3,7 +3,7 @@ NFL Weather RShiny App (2026 Season)
 
 **Live Application:** [Experience the NFL Weather Dashboard on ShinyApps](https://rcuevas.shinyapps.io/NFL_Weather/)
 
-An interactive R Shiny dashboard providing detailed weather forecasts and game-day impact analysis for the 2026 NFL regular season — all 272 games across Weeks 1–18.
+An interactive R Shiny dashboard providing detailed weather forecasts and game-day impact analysis for the 2026 NFL regular season — all 272 games across Weeks 1–18 — plus live scores, division standings, and the playoff picture as the season unfolds.
 
 This application is built for football fans, fantasy players, and analysts who want to understand how weather conditions will affect game day. It moves beyond a simple forecast by providing custom, data-driven scores for specific gameplay elements and a clear, at-a-glance impact assessment for every game in the 2026 season.
 
@@ -15,7 +15,7 @@ Key Features
 *   **Interactive Filtering:** View the entire 2026 NFL schedule by Week, Stadium, Team, or a specific Date.
 *   **Dynamic UI:** The interface updates intelligently based on your selections to show you the most relevant games.
 *   **Kickoff-Based Conditions:** The headline temperature, wind, and precipitation figures describe the forecast period that actually covers kickoff — not whatever the weather happens to be doing at the venue right now. When a game is still beyond the forecast horizon, the dashboard says so plainly and falls back to current venue conditions rather than passing them off as the game forecast.
-*   **Live Weather Data:** Utilizes the National Weather Service (NWS) API for up-to-date daily and hourly forecast information, plus real-time ASOS observations from the Iowa Environmental Mesonet. A **Refresh Weather Data** button clears the cache and re-pulls the latest conditions on demand.
+*   **Live Weather Data:** Utilizes the National Weather Service (NWS) API for up-to-date daily and hourly forecast information, plus real-time ASOS observations from the Iowa Environmental Mesonet. A **Refresh Weather & Scores** button clears every cache and re-pulls the latest conditions, scores, and standings on demand.
 *   **Game Impact Assessment:** A color-coded system (Green, Yellow, Red) provides an immediate sense of the potential for weather to disrupt a game.
 *   **Custom Gameplay Scores:**
     -   **Kicking Score (1-10):** A unique score that heavily weights wind, precipitation, and cold to grade the difficulty of the kicking game.
@@ -29,8 +29,31 @@ Key Features
     -   **Hourly Detail:** A detailed, 48-hour forecast showing how conditions will evolve around kickoff.
     -   **Game Analysis:** A dedicated view of the conditions before, during, and after a selected game, including the custom Kicking, Passing, and Rush Advantage scores.
     -   **Week Overview:** A master table of every game for a given week, with the ability to filter out games played in domes. It follows whichever game you have selected, so it always describes the same week as the rest of the dashboard. Once a game kicks off, its score and status appear in the row.
-    -   **Standings & Scores:** Scoreboard for the selected week, the playoff picture, and AFC/NFC division standings.
+    -   **Standings & Scores:** Live scoreboard, playoff picture, and division standings — detailed below.
 *   **Domes and International Venues Handled Explicitly:** Indoor stadiums are flagged and skip weather lookups entirely. The 2026 slate includes eight games outside the United States (Melbourne, Rio de Janeiro, London ×2, Paris, Madrid, Munich, and Monterrey); these sit outside National Weather Service coverage and are labelled as such instead of showing a misleading forecast.
+
+Standings & Scores Tab
+----------------------
+
+Added for the 2026 season so the weather dashboard doubles as a season tracker. Everything on this tab comes from ESPN's public NFL endpoints (no key required) and updates on its own as games are played.
+
+**Scoreboard.** Every game for the week the dashboard is currently showing — the same week as the rest of the app, so switching to a Week 11 game shows Week 11's slate. Each row carries the matchup, status, score, and both teams' records:
+
+| Status | What you'll see |
+|---|---|
+| Upcoming | Kickoff day and time (e.g. *Sun, September 13th at 1:00 PM EDT*) |
+| In progress | **LIVE** with the clock and quarter, plus the running score |
+| Finished | **Final** with the final score |
+
+While at least one game is in progress *and* this tab is open, the scoreboard re-polls automatically about once a minute; otherwise it doesn't poll at all, since a scheduled or finished slate doesn't change. Live and final scores also appear in a **Score** column beside each game's weather row in the Week Overview.
+
+**Playoff Picture.** Seeds 1–7 for each conference — division winners 1–4 (the #1 seed marked as the first-round bye), wild cards 5–7. These are ESPN's own `playoffSeed` rankings, which apply the full NFL tiebreaker procedure (head-to-head, division record, common games, conference record, and so on). They are deliberately *not* recomputed from win percentage, which gets tiebreakers wrong. Clinch markers appear as the season plays out:
+
+`z` clinched division · `y` clinched wild card · `x` clinched playoff berth · `*` clinched first-round bye / home field · `e` eliminated
+
+**Division Standings.** AFC and NFC side by side, grouped by division: W-L-T, win percentage, points for/against and differential, plus division, conference, home, and road records and current streak. Records are requested for the regular season only, so preseason results never leak into the standings.
+
+Before Week 1 kicks off, the standings show 0-0 and the playoff picture displays a placeholder; both populate automatically after the first games are played.
 
 How to Run Locally
 ------------------
