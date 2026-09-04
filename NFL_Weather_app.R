@@ -68,9 +68,43 @@ parse_wind_mph <- function(wind_str) {
   wind_str <- as.character(wind_str)[1]  # NWS sends strings, ASOS sends numerics
   if (is.na(wind_str) || wind_str == "" ||
       tolower(trimws(wind_str)) == "calm") return(0)
-  num <- suppressWarnings(as.numeric(gsub("[^0-9]", "", strsplit(wind_str, " to ")[[1]][1])))
-  if (is.na(num)) return(0)
-  num
+  # NWS ranges like "15 to 25 mph" are scored against the UPPER bound. Every
+  # impact threshold asks "could the wind reach X?", and the top of the range is
+  # the honest answer — the low end under-scores a gusty day by a full tier.
+  # (Display strings still show the full range; only the number changes.)
+  parts <- suppressWarnings(as.numeric(gsub("[^0-9]", "", strsplit(wind_str, " to ")[[1]])))
+  parts <- parts[!is.na(parts)]
+  if (length(parts) == 0) return(0)
+  max(parts)
+}
+
+# Apparent temperature using the NWS formulas. Wind chill applies at or below
+# 50°F with at least 3 mph of wind; heat index applies at or above 80°F and
+# needs relative humidity, which only the hourly feed carries. Otherwise the
+# air temperature comes back unchanged. Vectorised.
+feels_like_f <- function(temp_f, wind_mph, rh = NA) {
+  t <- as.numeric(temp_f)
+  v <- rep_len(as.numeric(wind_mph), length(t))
+  h <- rep_len(as.numeric(rh),       length(t))
+  out <- t
+
+  wc <- !is.na(t) & !is.na(v) & t <= 50 & v >= 3
+  out[wc] <- 35.74 + 0.6215 * t[wc] - 35.75 * v[wc]^0.16 + 0.4275 * t[wc] * v[wc]^0.16
+
+  hi <- !is.na(t) & !is.na(h) & t >= 80
+  if (any(hi)) {
+    T <- t[hi]; R <- h[hi]
+    x <- -42.379 + 2.04901523 * T + 10.14333127 * R - 0.22475541 * T * R -
+         6.83783e-3 * T^2 - 5.481717e-2 * R^2 + 1.22874e-3 * T^2 * R +
+         8.5282e-4 * T * R^2 - 1.99e-6 * T^2 * R^2
+    # Rothfusz low-humidity and high-humidity adjustments
+    a1 <- R < 13 & T <= 112
+    x[a1] <- x[a1] - ((13 - R[a1]) / 4) * sqrt((17 - abs(T[a1] - 95)) / 17)
+    a2 <- R > 85 & T <= 87
+    x[a2] <- x[a2] + ((R[a2] - 85) / 10) * ((87 - T[a2]) / 5)
+    out[hi] <- x
+  }
+  round(out)
 }
 
 # Safe aggregations: return NA instead of -Inf/Inf/NaN when everything is missing
@@ -98,7 +132,7 @@ weather_alert_class <- function(status) {
 }
 
 # Function to calculate weather severity index
-calculate_weather_index <- function(temp, wind_speed, precip_chance, forecast_text) {
+calculate_weather_index <- function(temp, wind_speed, precip_chance, forecast_text, feels_like = NA) {
   # Initialize scores
   temp_score <- 0
   wind_score <- 0
@@ -111,7 +145,10 @@ calculate_weather_index <- function(temp, wind_speed, precip_chance, forecast_te
   if (is.null(precip_chance)) precip_chance <- NA
   if (is.null(forecast_text)) forecast_text <- ""
   
-  # Temperature impact (below 20°F or above 95°F is concerning)
+  # Temperature impact (below 20°F or above 95°F is concerning). Scored on the
+  # apparent temperature when the caller supplies one — a 35°F day at 25 mph is
+  # a 22°F wind chill, and that is what players and the ball actually feel.
+  if (!is.na(feels_like)) temp <- feels_like
   if (!is.na(temp)) {
     if (temp < 20) temp_score <- 2  # Very cold
     else if (temp < 32) temp_score <- 1  # Cold/freezing
@@ -416,6 +453,101 @@ find_period_for_time <- function(forecast, target_time) {
   if (nrow(hit) == 0) NULL else hit
 }
 
+# ---- ESPN: standings and scoreboard -----------------------------------------
+# ESPN's public endpoints need no key, but their WAF answers 403 to ANY custom
+# User-Agent — a plain browser string included. Only httr's default UA gets
+# through, so these requests deliberately set none. Timeouts are mandatory (see
+# CLAUDE.md): a stalled call here would freeze every connected user's session.
+
+# ESPN -> this app's schedule abbreviations. Every other team already matches.
+ESPN_ABBR <- c(LAR = "LA", WSH = "WAS")
+to_app_abbr <- function(x) { y <- ESPN_ABBR[x]; unname(ifelse(is.na(y), x, y)) }
+
+.espn_get <- function(url, cache_key, ttl_min) {
+  cached <- .nws_cache[[cache_key]]
+  if (!is.null(cached) &&
+      as.numeric(difftime(Sys.time(), cached$time, units = "mins")) < ttl_min) {
+    return(cached$data)
+  }
+  out <- tryCatch({
+    resp <- GET(url, timeout(12))
+    stop_for_status(resp, "reach ESPN")
+    fromJSON(content(resp, "text", encoding = "UTF-8"), simplifyVector = FALSE)
+  }, error = function(e) {
+    message("ESPN error: ", conditionMessage(e))
+    NULL
+  })
+  if (!is.null(out)) .nws_cache[[cache_key]] <- list(time = Sys.time(), data = out)
+  out
+}
+
+# One row per team. Seed and clinch status are ESPN's own — computed with the
+# full NFL tiebreaker procedure, which a win-pct/point-diff sort cannot
+# reproduce. Cached 5 minutes.
+fetch_espn_standings <- function(season = 2026) {
+  d <- .espn_get(
+    paste0("https://site.api.espn.com/apis/v2/sports/football/nfl/standings?season=",
+           season, "&level=3&seasontype=2"),  # seasontype=2: regular season only — the default mixes in preseason W-L
+    paste0("espn_standings_", season), ttl_min = 5)
+  if (is.null(d) || !length(d$children)) return(NULL)
+
+  rows <- list()
+  for (conf in d$children) for (div in conf$children) for (e in div$standings$entries) {
+    st   <- setNames(e$stats, vapply(e$stats, function(s) s$name, ""))
+    val  <- function(n) { s <- st[[n]]; if (is.null(s$value)) NA_real_ else as.numeric(s$value) }
+    disp <- function(n) { s <- st[[n]]; if (is.null(s$displayValue)) NA_character_ else s$displayValue }
+    rows[[length(rows) + 1]] <- data.frame(
+      Conference = conf$abbreviation,
+      Division   = div$name,
+      Team       = e$team$displayName,
+      Abbr       = to_app_abbr(e$team$abbreviation),
+      W = val("wins"), L = val("losses"), T = val("ties"),
+      PCT = val("winPercent"), PF = val("pointsFor"), PA = val("pointsAgainst"),
+      DIFF = val("pointDifferential"),
+      Div = disp("divisionRecord"), Conf = disp("vs. Conf."),
+      Home = disp("Home"), Road = disp("Road"), Streak = disp("streak"),
+      Seed = val("playoffSeed"),
+      Clinch = disp("clincher"),
+      ClinchDesc = if (is.null(st[["clincher"]]$description)) NA_character_
+                   else st[["clincher"]]$description,
+      stringsAsFactors = FALSE)
+  }
+  if (!length(rows)) return(NULL)
+  bind_rows(rows) %>% arrange(Conference, Division, Seed, desc(PCT), desc(DIFF))
+}
+
+# One row per game in a regular-season week: status, score, records. Cached
+# 60 seconds so the in-game auto-refresh can never exceed one call a minute.
+fetch_espn_scoreboard <- function(week) {
+  d <- .espn_get(
+    sprintf("https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?week=%d&seasontype=2",
+            as.integer(week)),
+    paste0("espn_scoreboard_", week), ttl_min = 1)
+  if (is.null(d) || !length(d$events)) return(NULL)
+
+  bind_rows(lapply(d$events, function(ev) {
+    cp   <- ev$competitions[[1]]
+    side <- function(which) Filter(function(c) c$homeAway == which, cp$competitors)[[1]]
+    home <- side("home"); away <- side("away")
+    rec  <- function(c) if (length(c$records)) c$records[[1]]$summary else NA_character_
+    data.frame(
+      Away = to_app_abbr(away$team$abbreviation), Home = to_app_abbr(home$team$abbreviation),
+      AwayScore = suppressWarnings(as.integer(away$score)),
+      HomeScore = suppressWarnings(as.integer(home$score)),
+      AwayRecord = rec(away), HomeRecord = rec(home),
+      StatusName = cp$status$type$name, StatusDetail = cp$status$type$detail,
+      Completed = isTRUE(cp$status$type$completed),
+      stringsAsFactors = FALSE)
+  }))
+}
+
+# "24-17 Final", "7-3 Q2 8:41", or "" for a game that hasn't kicked off.
+score_label <- function(sb_row) {
+  if (is.null(sb_row) || nrow(sb_row) == 0 || sb_row$StatusName[1] == "STATUS_SCHEDULED") return("")
+  paste0(sb_row$AwayScore[1], "-", sb_row$HomeScore[1], " ",
+         if (isTRUE(sb_row$Completed[1])) "Final" else sb_row$StatusDetail[1])
+}
+
 # Converts NWS compass direction string ("SW", "NNE", etc.) to degrees (0-359)
 wind_dir_to_deg <- function(dir_str) {
   dirs <- c(N=0, NNE=22.5, NE=45, ENE=67.5, E=90, ESE=112.5, SE=135, SSE=157.5,
@@ -503,7 +635,7 @@ ui <- dashboardPage(
 
     # Manual refresh for live weather (clears the 10-min NWS cache and re-pulls)
     div(style = "padding: 5px 15px;",
-        actionButton("refresh_weather", "Refresh Weather Data",
+        actionButton("refresh_weather", "Refresh Weather & Scores",
                      icon = icon("sync"), class = "btn-block")),
     div(style = "padding: 0 15px 5px; font-size: 0.8em; color: #aaa;",
         textOutput("weather_last_updated")),
@@ -521,7 +653,9 @@ ui <- dashboardPage(
     hr(),
     
     div(style = "padding-left: 15px; font-size: 0.9em;",
-        helpText("Data: National Weather Service"),
+        helpText("Weather: National Weather Service"),
+        helpText("Observations: Iowa Environmental Mesonet"),
+        helpText("Standings & scores: ESPN"),
         br(),
         helpText("For bugs or comments:"),
         p("Rodney Cuevas"),
@@ -653,6 +787,37 @@ ui <- dashboardPage(
                                hr(),
                                DT::dataTableOutput("week_overview") %>% withSpinner(type = 6, color = "#004085"))
                          )
+                ),
+
+                tabPanel("Standings & Scores",
+                         br(),
+                         fluidRow(
+                           box(width = 12,
+                               title = "Scoreboard",
+                               status = "primary",
+                               solidHeader = TRUE,
+                               h4(textOutput("scores_caption"), style = "margin-top: 0;"),
+                               DT::dataTableOutput("scoreboard_table") %>% withSpinner(type = 6, color = "#004085"))
+                         ),
+                         fluidRow(
+                           box(width = 12,
+                               title = "Playoff Picture",
+                               status = "success",
+                               solidHeader = TRUE,
+                               uiOutput("playoff_picture"))
+                         ),
+                         fluidRow(
+                           box(width = 6,
+                               title = "AFC Standings",
+                               status = "danger",
+                               solidHeader = TRUE,
+                               DT::dataTableOutput("afc_standings") %>% withSpinner(type = 6, color = "#004085")),
+                           box(width = 6,
+                               title = "NFC Standings",
+                               status = "info",
+                               solidHeader = TRUE,
+                               DT::dataTableOutput("nfc_standings") %>% withSpinner(type = 6, color = "#004085"))
+                         )
                 )
     )
   )
@@ -671,7 +836,7 @@ server <- function(input, output, session) {
   })
 
   output$weather_last_updated <- renderText({
-    paste("Weather updated", format(weather_refresh(), "%I:%M %p %Z"))
+    paste("Data updated", format(weather_refresh(), "%I:%M %p %Z"))
   })
 
   # Reactive to determine the current NFL week
@@ -933,6 +1098,9 @@ server <- function(input, output, session) {
         wind_dir   = p$windDirection[1],
         precip     = p$probabilityOfPrecipitation.value[1],
         conditions = p$shortForecast[1],
+        feels_like = feels_like_f(
+          p$temperature[1], parse_wind_mph(p$windSpeed[1]),
+          if ("relativeHumidity.value" %in% names(p)) p$relativeHumidity.value[1] else NA),
         resolution = kf$resolution
       ))
     }
@@ -978,7 +1146,8 @@ server <- function(input, output, session) {
     dc <- display_conditions()
     if (is.null(dc)) return(NULL)
 
-    index <- calculate_weather_index(dc$temp, dc$wind, dc$precip, dc$conditions)
+    fl <- if (is.null(dc$feels_like)) NA else dc$feels_like
+    index <- calculate_weather_index(dc$temp, dc$wind, dc$precip, dc$conditions, feels_like = fl)
     alert_class <- weather_alert_class(index$status)
 
     if (identical(dc$scope, "kickoff")) {
@@ -986,6 +1155,9 @@ server <- function(input, output, session) {
                  h3(paste(index$icon, "Kickoff Forecast:", index$level)),
                  p(index$description),
                  p(strong("Conditions:"), dc$conditions),
+                 if (!is.na(fl) && abs(fl - dc$temp) >= 2)
+                   p(strong("Feels like:"), paste0(fl, "°F"),
+                     span(style = "color:#666;", if (fl < dc$temp) " (wind chill)" else " (heat index)")),
                  p(strong("Kickoff:"),
                    format(with_tz(game$game_datetime, game$TimeZone),
                           "%a %b %d, %I:%M %p %Z"))))
@@ -1024,9 +1196,12 @@ server <- function(input, output, session) {
     }
     temp <- dc$temp
     color <- if (temp < 32 || temp > 85) "red" else if (temp < 40 || temp > 75) "yellow" else "green"
+    fl <- if (is.null(dc$feels_like)) NA else dc$feels_like
+    subtitle <- paste(dc$prefix, "Temperature")
+    if (!is.na(fl) && abs(fl - temp) >= 2) subtitle <- paste0(subtitle, " · feels like ", fl, "°F")
     valueBox(
       paste0(temp, "°F"),
-      paste(dc$prefix, "Temperature"),
+      subtitle,
       icon = icon("thermometer-half"),
       color = color
     )
@@ -1145,7 +1320,7 @@ server <- function(input, output, session) {
         )
       
       DT::datatable(enhanced_forecast,
-                    escape = FALSE,
+                    escape = -2,  # only the Status badge (col 2) carries HTML; NWS text stays escaped
                     options = list(
                       pageLength = 7,
                       dom = 't',
@@ -1217,7 +1392,7 @@ server <- function(input, output, session) {
         )
       
       DT::datatable(enhanced_hourly,
-                    escape = FALSE,
+                    escape = -2,  # only the Status badge (col 2) carries HTML; NWS text stays escaped
                     options = list(
                       pageLength = 12,
                       lengthMenu = c(12, 24, 48)
@@ -1309,11 +1484,15 @@ server <- function(input, output, session) {
       slice(1)
     
     if (nrow(kickoff) > 0) {
+      kick_feels <- feels_like_f(
+        kickoff$temperature, parse_wind_mph(kickoff$windSpeed),
+        if ("relativeHumidity.value" %in% names(kickoff)) kickoff$relativeHumidity.value else NA)
       index <- calculate_weather_index(
         kickoff$temperature,
         kickoff$windSpeed,
         kickoff$probabilityOfPrecipitation.value,
-        kickoff$shortForecast
+        kickoff$shortForecast,
+        feels_like = kick_feels
       )
       
       # Calculate all gameplay scores
@@ -1331,7 +1510,9 @@ server <- function(input, output, session) {
         p(strong("Status:"),
           span(paste(index$icon, index$level),
                style = paste0("color: ", index$color, "; font-weight: bold;"))),
-        p(strong("Temperature:"), paste0(kickoff$temperature, "°F")),
+        p(strong("Temperature:"), paste0(kickoff$temperature, "°F"),
+          if (!is.na(kick_feels) && abs(kick_feels - kickoff$temperature) >= 2)
+            span(style = "color:#666;", paste0(" (feels like ", kick_feels, "°F)"))),
         p(strong("Wind:"), paste(kickoff$windSpeed, "from the", kickoff$windDirection)),
         if (!is.null(wind_rel)) p(strong("Wind Angle:"),
                                   span(wind_rel$type, style = "font-weight: bold;"),
@@ -1501,12 +1682,20 @@ server <- function(input, output, session) {
     }
 
     if (nrow(display_data) > 0) {
+      # Once a game kicks off, ESPN's score/status lands beside its weather row
+      sb <- scoreboard_data()
+      score_for <- function(away, home) {
+        if (is.null(sb)) return("")
+        score_label(sb[sb$Away == away & sb$Home == home, , drop = FALSE])
+      }
       week_weather <- display_data %>%
+        mutate(Score = unname(mapply(score_for, Away_Team, Home_Team))) %>%
         select(
           Matchup = game_label,
           Stadium,
           City,
           Status,
+          Score,
           `Temp (°F)` = current_temp,
           Wind = current_wind,
           `Precip %` = current_precip
@@ -1518,7 +1707,7 @@ server <- function(input, output, session) {
         )
 
       DT::datatable(week_weather,
-                    escape = FALSE,
+                    escape = -4,  # only the Status badge (col 4) carries HTML; everything else stays escaped
                     options = list(
                       pageLength = 16,
                       lengthMenu = c(16, 32)
@@ -1529,16 +1718,141 @@ server <- function(input, output, session) {
     }
   }, server = FALSE)
 
+  # ---- Standings & Scores ---------------------------------------------------
+  # Scoreboard for the week the dashboard is showing. While that tab is open AND
+  # a game is in progress, re-poll every ~65s (the fetch is cached 60s, so this
+  # can't exceed one ESPN call a minute). A scheduled or finished slate doesn't
+  # change, so otherwise there is no polling at all.
+  scoreboard_data <- reactive({
+    weather_refresh()
+    sb <- fetch_espn_scoreboard(overview_week())
+    if (identical(input$main_tabs, "Standings & Scores") &&
+        !is.null(sb) && any(sb$StatusName == "STATUS_IN_PROGRESS")) {
+      invalidateLater(65000, session)
+    }
+    sb
+  })
+
+  standings_data <- reactive({
+    weather_refresh()
+    req(identical(input$main_tabs, "Standings & Scores"))
+    fetch_espn_standings(2026)
+  })
+
+  output$scores_caption <- renderText({
+    wk <- overview_week()
+    sb <- scoreboard_data()
+    if (is.null(sb)) return(paste("Week", wk))
+    live <- sum(sb$StatusName == "STATUS_IN_PROGRESS")
+    done <- sum(sb$Completed)
+    paste0("Week ", wk, " — ", done, " final · ", live, " in progress · ",
+           nrow(sb) - done - live, " upcoming",
+           if (live > 0) "   (auto-refreshing every minute)" else "")
+  })
+
+  output$scoreboard_table <- DT::renderDataTable({
+    req(identical(input$main_tabs, "Standings & Scores"))
+    sb <- scoreboard_data()
+    if (is.null(sb)) {
+      return(DT::datatable(data.frame(Note = "Scores unavailable — ESPN did not respond."),
+                           options = list(dom = "t"), rownames = FALSE, colnames = ""))
+    }
+    sb %>%
+      mutate(
+        Matchup = paste0(Away, " @ ", Home),
+        Score   = vapply(seq_len(n()), function(i) score_label(sb[i, , drop = FALSE]), ""),
+        Status  = ifelse(Completed, "Final",
+                    ifelse(StatusName == "STATUS_IN_PROGRESS", paste("LIVE —", StatusDetail), StatusDetail)),
+        Records = paste0(Away, " ", AwayRecord, "  ·  ", Home, " ", HomeRecord)
+      ) %>%
+      select(Matchup, Status, Score, Records) %>%
+      DT::datatable(options = list(pageLength = 16, dom = "t", ordering = FALSE), rownames = FALSE) %>%
+      DT::formatStyle("Status", fontWeight = DT::styleEqual("Final", "bold"))
+  }, server = FALSE)
+
+  standings_table <- function(conf_abbr) {
+    DT::renderDataTable({
+      req(identical(input$main_tabs, "Standings & Scores"))
+      d <- standings_data()
+      if (is.null(d)) {
+        return(DT::datatable(data.frame(Note = "Standings unavailable — ESPN did not respond."),
+                             options = list(dom = "t"), rownames = FALSE, colnames = ""))
+      }
+      d %>%
+        filter(Conference == conf_abbr) %>%
+        mutate(
+          Seed   = ifelse(!is.na(Seed) & Seed >= 1 & Seed <= 7, paste0("#", Seed), ""),  # ESPN reports 0 before any games
+          Clinch = ifelse(is.na(Clinch), "", Clinch),
+          PCT    = sprintf("%.3f", PCT)
+        ) %>%
+        select(Division, Seed, Team, W, L, T, PCT, PF, PA, DIFF,
+               Div, Conf, Home, Road, Streak, Clinch) %>%
+        DT::datatable(options = list(pageLength = 16, dom = "t", ordering = FALSE, scrollX = TRUE),
+                      rownames = FALSE) %>%
+        DT::formatStyle("DIFF", color = DT::styleInterval(c(-1, 0), c("#dc3545", "#333", "#28a745")))
+    }, server = FALSE)
+  }
+  output$afc_standings <- standings_table("AFC")
+  output$nfc_standings <- standings_table("NFC")
+
+  # Seeds 1-7 per conference straight from ESPN's playoffSeed, which applies the
+  # full NFL tiebreaker procedure. Clinch codes appear as the season plays out.
+  output$playoff_picture <- renderUI({
+    req(identical(input$main_tabs, "Standings & Scores"))
+    d <- standings_data()
+    if (is.null(d)) return(NULL)
+    if (all(d$W + d$L + d$T == 0, na.rm = TRUE)) {
+      return(p(em("Seeds appear once games have been played. ESPN ranks teams with the ",
+                  "full NFL tiebreaker procedure, so this stays accurate through Week 18."),
+               style = "color: #666;"))
+    }
+
+    seed_list <- function(conf_abbr, color) {
+      s <- d %>% filter(Conference == conf_abbr, !is.na(Seed), Seed <= 7) %>% arrange(Seed)
+      tagList(
+        h4(paste(conf_abbr, "Playoff Seeds"), style = paste0("color:", color, ";")),
+        lapply(seq_len(nrow(s)), function(i) {
+          r <- s[i, ]
+          badge <- if (r$Seed == 1) "#6f42c1" else if (r$Seed <= 4) "#28a745" else "#ffc107"
+          div(style = "padding: 5px 0; border-bottom: 1px solid #eee;",
+              span(style = paste0("background:", badge, "; color: #fff; padding: 2px 8px; ",
+                                  "border-radius: 3px; font-weight: bold; margin-right: 10px;"),
+                   paste0("#", r$Seed)),
+              strong(r$Team),
+              span(style = "color: #666; margin-left: 8px;",
+                   paste0(r$W, "-", r$L, if (!is.na(r$T) && r$T > 0) paste0("-", r$T) else "")),
+              if (r$Seed == 1) span(style = "color: #6f42c1; margin-left: 8px; font-weight: bold;", "first-round bye"),
+              if (r$Seed > 4)  span(style = "color: #856404; margin-left: 8px;", "wild card"),
+              if (!is.na(r$Clinch) && nzchar(r$Clinch))
+                span(style = "color: #666; margin-left: 8px;", paste0("(", r$Clinch, " — ", r$ClinchDesc, ")")))
+        })
+      )
+    }
+
+    fluidRow(
+      column(6, seed_list("AFC", "#c8102e")),
+      column(6, seed_list("NFC", "#013369")),
+      column(12, p(em("z clinched division · y clinched wild card · x clinched playoff berth · ",
+                      "* clinched bye / home field · e eliminated"),
+                   style = "color: #888; font-size: 0.85em; margin-top: 10px;"))
+    )
+  })
+
   # Every output below lives in a tab that is hidden at page load, and each is
   # wrapped in withSpinner(). withSpinner() hides the real output element while
   # the spinner shows, which Shiny's default suspendWhenHidden reads as "not
   # visible" — so the output is suspended, never computes, and the spinner spins
-  # forever. Opting out of suspension is what breaks that deadlock. (week_overview
-  # still defers its expensive multi-stadium fetch via the req() on its tab above.)
+  # forever. Opting out of suspension is what breaks that deadlock. Expensive
+  # fetches still defer via the req() on their tab title above.
   outputOptions(output, "hourly_forecast_enhanced", suspendWhenHidden = FALSE)
   outputOptions(output, "gameday_analysis",         suspendWhenHidden = FALSE)
   outputOptions(output, "week_overview",            suspendWhenHidden = FALSE)
   outputOptions(output, "week_overview_label",      suspendWhenHidden = FALSE)
+  outputOptions(output, "scores_caption",           suspendWhenHidden = FALSE)
+  outputOptions(output, "scoreboard_table",         suspendWhenHidden = FALSE)
+  outputOptions(output, "afc_standings",            suspendWhenHidden = FALSE)
+  outputOptions(output, "nfc_standings",            suspendWhenHidden = FALSE)
+  outputOptions(output, "playoff_picture",          suspendWhenHidden = FALSE)
 }
 
 # 7. RUN THE APPLICATION ----

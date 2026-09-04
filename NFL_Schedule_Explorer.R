@@ -45,48 +45,39 @@ all_teams <- sort(unique(c(nfl_data$Home_Team, nfl_data$Away_Team)))
 all_networks <- sort(unique(nfl_data$Network[nfl_data$Network != "TBD"]))
 
 # --- ESPN Standings fetcher ---
+# ESPN's WAF answers 403 to ANY custom User-Agent (a browser string included);
+# only httr's default UA gets through, so this request deliberately sets none.
+# level=3 returns division-level groupings; seasontype=2 restricts records to
+# the regular season (the default mixes in preseason W-L). Seed and clinch
+# status come from ESPN, which applies the full NFL tiebreaker procedure.
 fetch_espn_standings <- function(season = 2026) {
-  url <- paste0("https://site.api.espn.com/apis/v2/sports/football/nfl/standings?season=", season)
+  url <- paste0("https://site.api.espn.com/apis/v2/sports/football/nfl/standings?season=",
+                season, "&level=3&seasontype=2")
   tryCatch({
-    resp <- GET(url, add_headers("User-Agent" = "NFL Schedule Explorer App"))
+    resp <- GET(url, timeout(12))
     if (status_code(resp) != 200) return(NULL)
-    data <- fromJSON(content(resp, "text", encoding = "UTF-8"), flatten = TRUE)
+    d <- fromJSON(content(resp, "text", encoding = "UTF-8"), simplifyVector = FALSE)
+    if (!length(d$children)) return(NULL)
 
-    # Parse the nested structure: children = conferences, children.children = divisions
-    results <- list()
-    for (conf in data$children) {
-      for (div in conf$children) {
-        div_name <- div$name
-        if (!is.null(div$standings$entries)) {
-          entries <- div$standings$entries
-          for (i in seq_len(nrow(entries))) {
-            team_abbr <- entries$team.abbreviation[i]
-            team_name <- entries$team.displayName[i]
-            stats <- entries$stats[[i]]
-            get_stat <- function(nm) {
-              val <- stats$value[stats$name == nm]
-              if (length(val) == 0) NA_real_ else val[1]
-            }
-            results[[length(results) + 1]] <- data.frame(
-              Division = div_name,
-              Team = team_name,
-              Abbr = team_abbr,
-              W = get_stat("wins"),
-              L = get_stat("losses"),
-              T = get_stat("ties"),
-              PCT = get_stat("winPercent"),
-              PF = get_stat("pointsFor"),
-              PA = get_stat("pointsAgainst"),
-              stringsAsFactors = FALSE
-            )
-          }
-        }
-      }
+    rows <- list()
+    for (conf in d$children) for (div in conf$children) for (e in div$standings$entries) {
+      st   <- setNames(e$stats, vapply(e$stats, function(s) s$name, ""))
+      val  <- function(n) { s <- st[[n]]; if (is.null(s$value)) NA_real_ else as.numeric(s$value) }
+      disp <- function(n) { s <- st[[n]]; if (is.null(s$displayValue)) NA_character_ else s$displayValue }
+      rows[[length(rows) + 1]] <- data.frame(
+        Division = div$name,
+        Team = e$team$displayName,
+        Abbr = e$team$abbreviation,
+        W = val("wins"), L = val("losses"), T = val("ties"),
+        PCT = val("winPercent"), PF = val("pointsFor"), PA = val("pointsAgainst"),
+        Seed = val("playoffSeed"), Clinch = disp("clincher"),
+        stringsAsFactors = FALSE
+      )
     }
-    if (length(results) == 0) return(NULL)
-    bind_rows(results) %>%
+    if (!length(rows)) return(NULL)
+    bind_rows(rows) %>%
       mutate(DIFF = PF - PA) %>%
-      arrange(Division, desc(PCT), desc(DIFF))
+      arrange(Division, Seed, desc(PCT), desc(DIFF))
   }, error = function(e) {
     message("ESPN standings fetch failed: ", e$message)
     NULL
@@ -462,28 +453,15 @@ server <- function(input, output, session) {
                style = "color: #aaa; font-style: italic; padding: 20px;"))
     }
 
-    # Top team per division = division winner; next 3 best records = wild cards
+    # Seeds 1-7 per conference straight from ESPN's playoffSeed. A win-pct /
+    # point-differential sort cannot reproduce the NFL tiebreaker procedure
+    # (head-to-head, division record, common games, conference record, ...),
+    # so the ranking is taken from ESPN rather than recomputed here.
     build_seeds <- function(conf_prefix) {
-      conf <- data %>% filter(grepl(paste0("^", conf_prefix), Division))
-
-      # Division winners (rank 1 in each division by PCT)
-      div_winners <- conf %>%
-        group_by(Division) %>%
-        slice_max(PCT, n = 1, with_ties = FALSE) %>%
-        ungroup() %>%
-        arrange(desc(PCT), desc(DIFF))
-
-      # Wild cards: everyone else, top 3
-      wild_cards <- conf %>%
-        anti_join(div_winners, by = "Abbr") %>%
-        arrange(desc(PCT), desc(DIFF)) %>%
-        head(3)
-
-      seeds <- bind_rows(
-        div_winners %>% mutate(Seed = row_number(), Type = "Division Winner"),
-        wild_cards %>% mutate(Seed = 5:7, Type = "Wild Card")
-      )
-      seeds
+      data %>%
+        filter(grepl(paste0("^", conf_prefix), Division), !is.na(Seed), Seed <= 7) %>%
+        arrange(Seed) %>%
+        mutate(Type = ifelse(Seed <= 4, "Division Winner", "Wild Card"))
     }
 
     afc_seeds <- build_seeds("AFC")

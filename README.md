@@ -22,11 +22,14 @@ Key Features
     -   **Passing Score (1-10):** A second score that analyzes wind, precipitation, and extreme temperatures to grade the conditions for the passing game.
     -   **Rush Advantage (0-10):** Grades how strongly the weather favors the running game over the pass (cold, precipitation, and snow push this higher).
 *   **Wind vs. Field Orientation:** Uses each stadium's long-axis bearing to classify kickoff wind as Along-Field, Diagonal, or Crosswind.
+*   **Feels-Like Temperature:** Wind chill and heat index computed with the NWS formulas. Impact scoring uses the apparent temperature, so a 35°F kickoff at 25 mph is graded as the 22°F wind chill it actually is. NWS wind ranges ("15 to 25 mph") are scored against their upper bound.
+*   **Standings, Scores & Playoff Picture:** Live scoreboard for the week you're viewing, division standings for both conferences (record, division/conference/home/road splits, streak), and playoff seeds 1–7 per conference with clinch status — all from ESPN, which applies the full NFL tiebreaker procedure. Scores refresh automatically every minute while a game is in progress, and final scores also appear beside each game in the Week Overview.
 *   **In-Depth Analysis Tabs:**
     -   **7-Day Outlook:** A summary of the week's forecast with impact ratings for each period.
     -   **Hourly Detail:** A detailed, 48-hour forecast showing how conditions will evolve around kickoff.
     -   **Game Analysis:** A dedicated view of the conditions before, during, and after a selected game, including the custom Kicking, Passing, and Rush Advantage scores.
-    -   **Week Overview:** A master table of every game for a given week, with the ability to filter out games played in domes. It follows whichever game you have selected, so it always describes the same week as the rest of the dashboard.
+    -   **Week Overview:** A master table of every game for a given week, with the ability to filter out games played in domes. It follows whichever game you have selected, so it always describes the same week as the rest of the dashboard. Once a game kicks off, its score and status appear in the row.
+    -   **Standings & Scores:** Scoreboard for the selected week, the playoff picture, and AFC/NFC division standings.
 *   **Domes and International Venues Handled Explicitly:** Indoor stadiums are flagged and skip weather lookups entirely. The 2026 slate includes eight games outside the United States (Melbourne, Rio de Janeiro, London ×2, Paris, Madrid, Munich, and Monterrey); these sit outside National Weather Service coverage and are labelled as such instead of showing a misleading forecast.
 
 How to Run Locally
@@ -62,9 +65,10 @@ This application relies on the following sources for its data:
 
 *   **Weather Forecasts:** National Weather Service (NWS) API (https://www.weather.gov/documentation/services-web-api) for all forecast data.
 *   **Real-Time Conditions:** ASOS/METAR observations from the Iowa Environmental Mesonet (https://mesonet.agron.iastate.edu/), requested directly so the call can be given a hard timeout. Verified working from the live shinyapps.io deployment; if a station is unreachable the dashboard falls back to the NWS forecast rather than failing.
+*   **Standings & Scores:** ESPN's public NFL endpoints (no key required). Standings are requested for the regular season only, so preseason results never leak into the records.
 *   **Schedule Data:** The `nfl_schedule_2026_detailed.csv` file included in this repository.
 
-Both sources are cached in-process — forecasts for 10 minutes, observations for 5 — so repeated views of the same venue don't re-hit the APIs. Every outbound request has a 12-second timeout.
+Everything is cached in-process — forecasts for 10 minutes, observations and standings for 5, scores for 1 — so repeated views don't re-hit the APIs, and the in-game score refresh can never exceed one request a minute. Every outbound request has a 12-second timeout.
 
 Repository Contents
 -------------------
