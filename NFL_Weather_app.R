@@ -2109,9 +2109,12 @@ server <- function(input, output, session) {
                       ". Pan out to see these markers; they sit outside NWS coverage.")),
           style = "color:#666; font-size:0.85em; margin-top:10px;"),
       p(HTML(paste0("Markers sit at each stadium's actual coordinates. The network shown is the ",
-                    "broadcaster carrying the game. This is <i>not</i> a regional coverage map — ",
-                    "which CBS/FOX game airs in which local TV market is set weekly by the networks ",
-                    "and is not published in any public API.")),
+                    "broadcaster carrying the game. This is <i>not</i> a regional coverage map: ",
+                    "which CBS or FOX game airs in a given local market is set by the networks each ",
+                    "week and has no public API. For the county-by-county picture, see ",
+                    "<a href='https://thesportsmaps.com/nfl/' target='_blank' rel='noopener'>Sports Maps</a> or ",
+                    "<a href='https://506sports.com/nfl-maps/' target='_blank' rel='noopener'>506 Sports</a>, ",
+                    "who compile those maps weekly from the networks' announcements.")),
         style = "color:#888; font-size:0.8em; margin-top:4px;")
     )
   })

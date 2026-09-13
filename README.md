@@ -71,7 +71,9 @@ Every game for the selected week plotted at its stadium's real coordinates on a 
 
 Clicking a marker shows the matchup, stadium, local kickoff time, the network, the live or final score once the game has started, and the kickoff weather.
 
-> **Note on regional coverage.** This is a map of *where the games are*, not a regional TV coverage map. Which CBS or FOX game airs in which local television market is set by the networks each week and is not published in any public API — ESPN's feed reports only "national" versus "local" and never the market-by-market breakdown. Sites that publish those maps compile them by hand from network press releases. Rather than guess at market boundaries, the map shows the broadcaster for each game and leaves the distribution question alone.
+> **Note on regional coverage.** This is a map of *where the games are*, not a regional TV coverage map. Which CBS or FOX game airs in a given local television market is set by the networks each week, and there is no public API for it — ESPN's feed reports only "national" versus "local" and never the market-by-market breakdown.
+>
+> County-level coverage maps *are* published weekly by [Sports Maps](https://thesportsmaps.com/nfl/) and [506 Sports](https://506sports.com/nfl-maps/), who compile them by hand from the networks' announcements. Their data is not licensed for reuse — Sports Maps' terms prohibit automated harvesting without prior written consent, and 506 Sports blocks automated access — so this app links to them rather than embedding their maps. If you want that view inside the dashboard, the route is to ask them for permission, not to scrape it.
 
 Before Week 1 kicks off, the standings show 0-0 and the playoff picture displays a placeholder; both populate automatically after the first games are played.
 
