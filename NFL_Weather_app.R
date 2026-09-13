@@ -10,6 +10,7 @@ library(lubridate)
 library(DT)
 library(here)
 library(shinycssloaders)
+library(leaflet)
 
 
 # 2. LOAD SCHEDULE DATA ----
@@ -122,6 +123,20 @@ status_badge <- function(status) {
   key <- ifelse(status %in% names(colors), status, "TBD")
   paste0('<span style="color: ', colors[key], '; font-weight: bold;">',
          icons[key], ' ', key, '</span>')
+}
+
+# Marker colours for the game map. Weather statuses reuse the legend palette so
+# the map reads the same as every table; the network palette is qualitative and
+# chosen to stay distinguishable for colour-blind viewers.
+STATUS_COLORS  <- c(GREEN = "#28a745", YELLOW = "#ffc107", RED = "#dc3545",
+                    DOME = "#6f42c1", TBD = "#6c757d")
+NETWORK_COLORS <- c(CBS = "#1f77b4", FOX = "#d62728", NBC = "#ff7f0e",
+                    ESPN = "#9467bd", `Prime Video` = "#17becf",
+                    Netflix = "#e377c2", `NFL Network` = "#2ca02c", TBD = "#7f7f7f")
+
+pick_color <- function(key, palette) {
+  out <- unname(palette[as.character(key)])
+  ifelse(is.na(out), "#6c757d", out)
 }
 
 # Maps a GREEN/YELLOW/RED status to its alert CSS class
@@ -492,7 +507,13 @@ fetch_espn_standings <- function(season = 2026) {
   if (is.null(d) || !length(d$children)) return(NULL)
 
   rows <- list()
-  for (conf in d$children) for (div in conf$children) for (e in div$standings$entries) {
+  for (conf in d$children) for (div in conf$children) {
+   # ESPN returns each division's entries already in standings order. That order
+   # is the authority for the division view: `playoffSeed` is 0 for any team that
+   # hasn't played yet, so sorting on it floats 0-0 teams above teams with wins.
+   div_rank <- 0L
+   for (e in div$standings$entries) {
+    div_rank <- div_rank + 1L
     st   <- setNames(e$stats, vapply(e$stats, function(s) s$name, ""))
     val  <- function(n) { s <- st[[n]]; if (is.null(s$value)) NA_real_ else as.numeric(s$value) }
     disp <- function(n) { s <- st[[n]]; if (is.null(s$displayValue)) NA_character_ else s$displayValue }
@@ -507,13 +528,18 @@ fetch_espn_standings <- function(season = 2026) {
       Div = disp("divisionRecord"), Conf = disp("vs. Conf."),
       Home = disp("Home"), Road = disp("Road"), Streak = disp("streak"),
       Seed = val("playoffSeed"),
+      DivRank = div_rank,
       Clinch = disp("clincher"),
       ClinchDesc = if (is.null(st[["clincher"]]$description)) NA_character_
                    else st[["clincher"]]$description,
       stringsAsFactors = FALSE)
+   }
   }
   if (!length(rows)) return(NULL)
-  bind_rows(rows) %>% arrange(Conference, Division, Seed, desc(PCT), desc(DIFF))
+  bind_rows(rows) %>%
+    # A seed of 0 means "not seeded yet"; push those last wherever seed is used.
+    mutate(SeedSort = ifelse(is.na(Seed) | Seed < 1, 99, Seed)) %>%
+    arrange(Conference, Division, DivRank)
 }
 
 # One row per game in a regular-season week: status, score, records. Cached
@@ -713,6 +739,17 @@ ui <- dashboardPage(
            } catch (err) {
              if (window.console) console.warn('DataTable adjust skipped:', err);
            }
+           // A Leaflet map built while its tab was hidden measures its container
+           // as 0x0 and renders grey; invalidateSize() re-measures it.
+           try {
+             if (window.HTMLWidgets) {
+               HTMLWidgets.findAll('.leaflet').forEach(function (w) {
+                 if (w && w.getMap) { var mp = w.getMap(); if (mp) mp.invalidateSize(); }
+               });
+             }
+           } catch (err) {
+             if (window.console) console.warn('Leaflet resize skipped:', err);
+           }
            window.dispatchEvent(new Event('resize'));
          });"
       ))
@@ -796,7 +833,15 @@ ui <- dashboardPage(
                                title = "Scoreboard",
                                status = "primary",
                                solidHeader = TRUE,
-                               h4(textOutput("scores_caption"), style = "margin-top: 0;"),
+                               fluidRow(
+                                 column(3,
+                                        selectInput("scores_week", "Week:",
+                                                    choices = sort(unique(schedule_data$Week)),
+                                                    selected = min(schedule_data$Week))),
+                                 column(9,
+                                        div(style = "padding-top: 25px;",
+                                            h4(textOutput("scores_caption"), style = "margin: 0;")))
+                               ),
                                DT::dataTableOutput("scoreboard_table") %>% withSpinner(type = 6, color = "#004085"))
                          ),
                          fluidRow(
@@ -807,16 +852,50 @@ ui <- dashboardPage(
                                uiOutput("playoff_picture"))
                          ),
                          fluidRow(
-                           box(width = 6,
-                               title = "AFC Standings",
-                               status = "danger",
+                           box(width = 12,
+                               title = "Standings",
+                               status = "warning",
                                solidHeader = TRUE,
-                               DT::dataTableOutput("afc_standings") %>% withSpinner(type = 6, color = "#004085")),
-                           box(width = 6,
-                               title = "NFC Standings",
-                               status = "info",
+                               radioButtons("standings_view", NULL,
+                                            choices = c("By Division" = "division",
+                                                        "By Conference (wild-card race)" = "conference"),
+                                            selected = "division", inline = TRUE),
+                               conditionalPanel(
+                                 condition = "input.standings_view == 'division'",
+                                 uiOutput("division_standings")
+                               ),
+                               conditionalPanel(
+                                 condition = "input.standings_view == 'conference'",
+                                 fluidRow(
+                                   column(6, h4("AFC", style = "color:#c8102e;"),
+                                          DT::dataTableOutput("afc_standings")),
+                                   column(6, h4("NFC", style = "color:#013369;"),
+                                          DT::dataTableOutput("nfc_standings"))
+                                 )
+                               ))
+                         )
+                ),
+
+                tabPanel("Game Map",
+                         br(),
+                         fluidRow(
+                           box(width = 12,
+                               title = "Where This Week's Games Are Being Played",
+                               status = "primary",
                                solidHeader = TRUE,
-                               DT::dataTableOutput("nfc_standings") %>% withSpinner(type = 6, color = "#004085"))
+                               fluidRow(
+                                 column(6,
+                                        radioButtons("map_color_by", "Colour markers by:",
+                                                     choices = c("Weather impact" = "weather",
+                                                                 "Broadcast network" = "network"),
+                                                     selected = "weather", inline = TRUE)),
+                                 column(6,
+                                        div(style = "padding-top: 25px;",
+                                            textOutput("map_caption")))
+                               ),
+                               leaflet::leafletOutput("game_map", height = 560) %>%
+                                 withSpinner(type = 6, color = "#004085"),
+                               uiOutput("map_footnote"))
                          )
                 )
     )
@@ -1611,9 +1690,11 @@ server <- function(input, output, session) {
     paste("Week", overview_week())
   })
 
-  week_weather_data <- reactive({
+  # Weather for every game in a given week. Shared by the Week Overview (which
+  # follows the selected game) and the Game Map (which follows the Scoreboard's
+  # week), so it takes the week as an argument rather than reading one reactive.
+  week_weather_for <- function(sel_week) {
     weather_refresh()  # re-fetch when the user clicks Refresh Weather Data
-    sel_week <- overview_week()
 
     week_games <- schedule_data %>%
       filter(Week == sel_week)
@@ -1663,7 +1744,11 @@ server <- function(input, output, session) {
         Status = weather_index$status
       ) %>%
       ungroup()
-  })
+  }
+
+  week_weather_data <- reactive({ week_weather_for(overview_week()) })
+  map_weather_data  <- reactive({ req(input$scores_week)
+                                  week_weather_for(as.numeric(input$scores_week)) })
 
   # Output: Week overview table (toggles dome filter without re-fetching weather)
   output$week_overview <- DT::renderDataTable({
@@ -1683,7 +1768,7 @@ server <- function(input, output, session) {
 
     if (nrow(display_data) > 0) {
       # Once a game kicks off, ESPN's score/status lands beside its weather row
-      sb <- scoreboard_data()
+      sb <- overview_scores()
       score_for <- function(away, home) {
         if (is.null(sb)) return("")
         score_label(sb[sb$Away == away & sb$Home == home, , drop = FALSE])
@@ -1723,11 +1808,30 @@ server <- function(input, output, session) {
   # a game is in progress, re-poll every ~65s (the fetch is cached 60s, so this
   # can't exceed one ESPN call a minute). A scheduled or finished slate doesn't
   # change, so otherwise there is no polling at all.
+  # The Scoreboard has its OWN week, defaulting to the week actually being
+  # played. It must not inherit overview_week(): that follows the selected game,
+  # so browsing a future home game on a Sunday would hide the live slate.
+  observeEvent(current_nfl_week(), {
+    updateSelectInput(session, "scores_week", selected = current_nfl_week())
+  }, once = TRUE)
+
   scoreboard_data <- reactive({
     weather_refresh()
-    sb <- fetch_espn_scoreboard(overview_week())
+    req(input$scores_week)
+    sb <- fetch_espn_scoreboard(as.numeric(input$scores_week))
     if (identical(input$main_tabs, "Standings & Scores") &&
         !is.null(sb) && any(sb$StatusName == "STATUS_IN_PROGRESS")) {
+      invalidateLater(65000, session)
+    }
+    sb
+  })
+
+  # Scores for the week the weather views are showing (Week Overview, Game Map),
+  # which follows the selected game and is often a different week.
+  overview_scores <- reactive({
+    weather_refresh()
+    sb <- fetch_espn_scoreboard(overview_week())
+    if (!is.null(sb) && any(sb$StatusName == "STATUS_IN_PROGRESS")) {
       invalidateLater(65000, session)
     }
     sb
@@ -1740,7 +1844,8 @@ server <- function(input, output, session) {
   })
 
   output$scores_caption <- renderText({
-    wk <- overview_week()
+    req(input$scores_week)
+    wk <- as.numeric(input$scores_week)
     sb <- scoreboard_data()
     if (is.null(sb)) return(paste("Week", wk))
     live <- sum(sb$StatusName == "STATUS_IN_PROGRESS")
@@ -1780,6 +1885,7 @@ server <- function(input, output, session) {
       }
       d %>%
         filter(Conference == conf_abbr) %>%
+        arrange(SeedSort, DivRank) %>%
         mutate(
           Seed   = ifelse(!is.na(Seed) & Seed >= 1 & Seed <= 7, paste0("#", Seed), ""),  # ESPN reports 0 before any games
           Clinch = ifelse(is.na(Clinch), "", Clinch),
@@ -1808,7 +1914,7 @@ server <- function(input, output, session) {
     }
 
     seed_list <- function(conf_abbr, color) {
-      s <- d %>% filter(Conference == conf_abbr, !is.na(Seed), Seed <= 7) %>% arrange(Seed)
+      s <- d %>% filter(Conference == conf_abbr, !is.na(Seed), Seed >= 1, Seed <= 7) %>% arrange(Seed)
       tagList(
         h4(paste(conf_abbr, "Playoff Seeds"), style = paste0("color:", color, ";")),
         lapply(seq_len(nrow(s)), function(i) {
@@ -1829,12 +1935,184 @@ server <- function(input, output, session) {
       )
     }
 
-    fluidRow(
+    # Early in the season ESPN seeds only the handful of teams that have played,
+    # which produces things like an 0-1 team holding the #1 seed. Say so rather
+    # than presenting a provisional ordering as a settled playoff picture.
+    seeded <- sum(d$Seed >= 1 & d$Seed <= 7, na.rm = TRUE)
+    provisional <- if (seeded < 14) {
+      div(class = "alert alert-warning", style = "margin-bottom: 15px;",
+          HTML(paste0("<b>Provisional.</b> Only ", sum(d$W + d$L + d$T > 0, na.rm = TRUE),
+                      " of 32 teams have played, so ESPN has seeded just ", seeded,
+                      " of the 14 playoff spots. Early seeds move a lot and can look odd ",
+                      "&mdash; they settle as the season fills in.")))
+    }
+
+    tagList(provisional, fluidRow(
       column(6, seed_list("AFC", "#c8102e")),
       column(6, seed_list("NFC", "#013369")),
       column(12, p(em("z clinched division · y clinched wild card · x clinched playoff berth · ",
                       "* clinched bye / home field · e eliminated"),
                    style = "color: #888; font-size: 0.85em; margin-top: 10px;"))
+    ))
+  })
+
+  # Division standings: four blocks per conference. Ordering inside a division
+  # follows ESPN's conference seed, which already encodes the NFL tiebreakers —
+  # the top seed in a division is its leader. Early in the season, before many
+  # games are played, ESPN's seeds are provisional and can look odd.
+  output$division_standings <- renderUI({
+    req(identical(input$main_tabs, "Standings & Scores"))
+    d <- standings_data()
+    if (is.null(d)) {
+      return(p("Standings unavailable — ESPN did not respond.", style = "color: #666;"))
+    }
+
+    div_block <- function(dv) {
+      tm <- d %>% filter(Division == dv) %>% arrange(DivRank)
+      if (nrow(tm) == 0) return(NULL)
+      hdr <- c("Team", "W-L", "PCT", "PF", "PA", "Diff", "Div", "Conf", "Strk")
+
+      body <- lapply(seq_len(nrow(tm)), function(i) {
+        r <- tm[i, ]
+        leader <- i == 1
+        cell <- function(x, extra = "") tags$td(style = paste0("padding:5px 6px; text-align:center;", extra), x)
+        tags$tr(
+          style = if (leader) "background:#eef6ff;" else "",
+          tags$td(style = paste0("padding:5px 8px;", if (leader) " font-weight:600;" else ""),
+                  if (leader) span(style = "color:#28a745; margin-right:5px;", HTML("&#9656;"))
+                  else span(style = "margin-right:5px; visibility:hidden;", HTML("&#9656;")),
+                  r$Team,
+                  if (!is.na(r$Clinch) && nzchar(r$Clinch))
+                    span(style = "color:#666; font-weight:400; margin-left:4px;", paste0("(", r$Clinch, ")"))),
+          cell(paste0(r$W, "-", r$L, if (!is.na(r$T) && r$T > 0) paste0("-", r$T) else "")),
+          cell(sprintf("%.3f", r$PCT)),
+          cell(r$PF), cell(r$PA),
+          cell(sprintf("%+d", as.integer(r$DIFF)),
+               paste0(" color:", if (r$DIFF > 0) "#28a745" else if (r$DIFF < 0) "#dc3545" else "#333", ";")),
+          cell(r$Div), cell(r$Conf), cell(r$Streak)
+        )
+      })
+
+      div(style = "margin-bottom: 20px;",
+          h5(dv, style = "font-weight:700; border-bottom:2px solid #ddd; padding-bottom:4px; margin-bottom:6px;"),
+          tags$table(style = "width:100%; font-size:0.9em;",
+                     tags$thead(tags$tr(style = "border-bottom:1px solid #eee;",
+                       lapply(seq_along(hdr), function(j)
+                         tags$th(style = paste0("padding:4px 6px; font-size:0.85em; color:#666; font-weight:600;",
+                                                if (j == 1) "" else " text-align:center;"),
+                                 hdr[j])))),
+                     tags$tbody(body)))
+    }
+
+    afc <- sort(unique(d$Division[d$Conference == "AFC"]))
+    nfc <- sort(unique(d$Division[d$Conference == "NFC"]))
+
+    tagList(
+      fluidRow(
+        column(6, h4("AFC", style = "color:#c8102e; font-weight:700;"), lapply(afc, div_block)),
+        column(6, h4("NFC", style = "color:#013369; font-weight:700;"), lapply(nfc, div_block))
+      ),
+      p(HTML("&#9656; division leader &nbsp;·&nbsp; <b>Div</b>/<b>Conf</b> = record within division / conference &nbsp;·&nbsp; ",
+             "clinch markers: z division, y wild card, x berth, * bye, e eliminated"),
+        style = "color:#888; font-size:0.85em; margin-top:6px;")
+    )
+  })
+
+  # ---- Game Map -------------------------------------------------------------
+  map_games <- reactive({
+    req(identical(input$main_tabs, "Game Map"))
+    wd <- map_weather_data()
+    req(!is.null(wd), nrow(wd) > 0)
+    sb <- scoreboard_data()
+    wd %>%
+      mutate(Score = unname(mapply(function(a, h) {
+        if (is.null(sb)) "" else score_label(sb[sb$Away == a & sb$Home == h, , drop = FALSE])
+      }, Away_Team, Home_Team)))
+  })
+
+  output$map_caption <- renderText({
+    g <- map_games()
+    paste0("Week ", as.numeric(input$scores_week), " — ", nrow(g), " games")
+  })
+
+  output$game_map <- leaflet::renderLeaflet({
+    g <- map_games()
+
+    by_network <- identical(input$map_color_by, "network")
+    key <- if (by_network) g$Network else g$Status
+    pal <- if (by_network) NETWORK_COLORS else STATUS_COLORS
+    cols <- pick_color(key, pal)
+
+    kickoff <- paste(format(g$game_date, "%a %b %d"), "·",
+                     sub(".*\\((.*)\\)$", "\\1", g$game_label))
+    wx <- ifelse(
+      g$Dome, "Indoor / dome — weather not a factor",
+      ifelse(is.na(g$current_temp) & g$game_date < Sys.Date(), "Already played — forecast no longer retained",
+      ifelse(is.na(g$current_temp), "Forecast not yet available (beyond the 7-day window)",
+             paste0(g$current_temp, "&deg;F &middot; ", g$current_wind, " &middot; ",
+                    ifelse(is.na(g$current_precip), "0", g$current_precip), "% precip"))))
+
+    popup <- paste0(
+      "<div style='font-size:13px; line-height:1.5;'>",
+      "<strong style='font-size:15px;'>", g$Away_Team, " @ ", g$Home_Team, "</strong><br/>",
+      "<span style='color:#555;'>", g$Stadium, ", ", g$City, "</span><br/>",
+      kickoff, "<br/>",
+      "<span style='color:#555;'>TV:</span> <strong>", g$Network, "</strong>",
+      ifelse(nzchar(g$Score), paste0("<br/><span style='color:#004085; font-weight:700;'>", g$Score, "</span>"), ""),
+      "<hr style='margin:6px 0;'/>", wx,
+      "</div>")
+
+    # Esri's light canvas, not CartoDB.Positron: CARTO now stamps
+    # "API KEY REQUIRED" across every tile it serves keyless (verified on
+    # light_all, light_all@2x and voyager alike). Esri's basemap is free, needs
+    # no key, and is the same clean grey canvas. Note the {z}/{y}/{x} order —
+    # Esri puts row before column, unlike the usual {z}/{x}/{y}.
+    m <- leaflet::leaflet(options = leaflet::leafletOptions(minZoom = 3)) %>%
+      leaflet::addTiles(
+        urlTemplate = paste0("https://server.arcgisonline.com/ArcGIS/rest/services/",
+                             "Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"),
+        attribution = "Tiles &copy; Esri",
+        options = leaflet::tileOptions(maxZoom = 16)) %>%
+      leaflet::addCircleMarkers(
+        lng = g$Longitude, lat = g$Latitude,
+        radius = 9, color = "#333", weight = 1.5,
+        fillColor = cols, fillOpacity = 0.9,
+        popup = popup,
+        label = paste0(g$Away_Team, " @ ", g$Home_Team))
+
+    # Frame on the domestic venues — an international game would otherwise zoom
+    # the whole map out to the Atlantic. Those markers are still on the map.
+    us <- g[grepl("^K", g$Station_ICAO), , drop = FALSE]
+    if (nrow(us) > 0) {
+      m <- m %>% leaflet::fitBounds(min(us$Longitude) - 2, min(us$Latitude) - 2,
+                                    max(us$Longitude) + 2, max(us$Latitude) + 2)
+    }
+
+    present <- intersect(names(pal), unique(as.character(key)))
+    if (length(present) > 0) {
+      m <- m %>% leaflet::addLegend(
+        position = "bottomright",
+        colors = unname(pal[present]), labels = present,
+        title = if (by_network) "Network" else "Weather impact", opacity = 0.9)
+    }
+    m
+  })
+
+  output$map_footnote <- renderUI({
+    g <- map_games()
+    intl <- g[!grepl("^K", g$Station_ICAO), , drop = FALSE]
+    tagList(
+      if (nrow(intl) > 0)
+        p(HTML(paste0("<b>International this week:</b> ",
+                      paste0(intl$Away_Team, " @ ", intl$Home_Team, " — ", intl$Stadium,
+                             ", ", intl$City, collapse = "; "),
+                      ". Pan out to see these markers; they sit outside NWS coverage.")),
+          style = "color:#666; font-size:0.85em; margin-top:10px;"),
+      p(HTML(paste0("Markers sit at each stadium's actual coordinates. The network shown is the ",
+                    "broadcaster carrying the game. This is <i>not</i> a regional coverage map — ",
+                    "which CBS/FOX game airs in which local TV market is set weekly by the networks ",
+                    "and is not published in any public API.")),
+        style = "color:#888; font-size:0.8em; margin-top:4px;")
     )
   })
 
@@ -1853,6 +2131,10 @@ server <- function(input, output, session) {
   outputOptions(output, "afc_standings",            suspendWhenHidden = FALSE)
   outputOptions(output, "nfc_standings",            suspendWhenHidden = FALSE)
   outputOptions(output, "playoff_picture",          suspendWhenHidden = FALSE)
+  outputOptions(output, "division_standings",       suspendWhenHidden = FALSE)
+  outputOptions(output, "game_map",                 suspendWhenHidden = FALSE)
+  outputOptions(output, "map_caption",              suspendWhenHidden = FALSE)
+  outputOptions(output, "map_footnote",             suspendWhenHidden = FALSE)
 }
 
 # 7. RUN THE APPLICATION ----

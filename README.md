@@ -23,13 +23,14 @@ Key Features
     -   **Rush Advantage (0-10):** Grades how strongly the weather favors the running game over the pass (cold, precipitation, and snow push this higher).
 *   **Wind vs. Field Orientation:** Uses each stadium's long-axis bearing to classify kickoff wind as Along-Field, Diagonal, or Crosswind.
 *   **Feels-Like Temperature:** Wind chill and heat index computed with the NWS formulas. Impact scoring uses the apparent temperature, so a 35°F kickoff at 25 mph is graded as the 22°F wind chill it actually is. NWS wind ranges ("15 to 25 mph") are scored against their upper bound.
-*   **Standings, Scores & Playoff Picture:** Live scoreboard for the week you're viewing, division standings for both conferences (record, division/conference/home/road splits, streak), and playoff seeds 1–7 per conference with clinch status — all from ESPN, which applies the full NFL tiebreaker procedure. Scores refresh automatically every minute while a game is in progress, and final scores also appear beside each game in the Week Overview.
+*   **Standings, Scores & Playoff Picture:** Live scoreboard, standings viewable by division or by conference (record, division/conference/home/road splits, streak), and playoff seeds 1–7 per conference with clinch status — all from ESPN, which applies the full NFL tiebreaker procedure. Scores refresh automatically every minute while a game is in progress, and final scores also appear beside each game in the Week Overview.
 *   **In-Depth Analysis Tabs:**
     -   **7-Day Outlook:** A summary of the week's forecast with impact ratings for each period.
     -   **Hourly Detail:** A detailed, 48-hour forecast showing how conditions will evolve around kickoff.
     -   **Game Analysis:** A dedicated view of the conditions before, during, and after a selected game, including the custom Kicking, Passing, and Rush Advantage scores.
     -   **Week Overview:** A master table of every game for a given week, with the ability to filter out games played in domes. It follows whichever game you have selected, so it always describes the same week as the rest of the dashboard. Once a game kicks off, its score and status appear in the row.
-    -   **Standings & Scores:** Live scoreboard, playoff picture, and division standings — detailed below.
+    -   **Standings & Scores:** Live scoreboard, playoff picture, and standings by division or conference — detailed below.
+    -   **Game Map:** Every game for the week mapped at its stadium, coloured by weather impact or broadcast network.
 *   **Domes and International Venues Handled Explicitly:** Indoor stadiums are flagged and skip weather lookups entirely. The 2026 slate includes eight games outside the United States (Melbourne, Rio de Janeiro, London ×2, Paris, Madrid, Munich, and Monterrey); these sit outside National Weather Service coverage and are labelled as such instead of showing a misleading forecast.
 
 Standings & Scores Tab
@@ -37,7 +38,7 @@ Standings & Scores Tab
 
 Added for the 2026 season so the weather dashboard doubles as a season tracker. Everything on this tab comes from ESPN's public NFL endpoints (no key required) and updates on its own as games are played.
 
-**Scoreboard.** Every game for the week the dashboard is currently showing — the same week as the rest of the app, so switching to a Week 11 game shows Week 11's slate. Each row carries the matchup, status, score, and both teams' records:
+**Scoreboard.** Every game for the selected week, which opens on the week actually being played. Each row carries the matchup, status, score, and both teams' records:
 
 | Status | What you'll see |
 |---|---|
@@ -51,7 +52,26 @@ While at least one game is in progress *and* this tab is open, the scoreboard re
 
 `z` clinched division · `y` clinched wild card · `x` clinched playoff berth · `*` clinched first-round bye / home field · `e` eliminated
 
-**Division Standings.** AFC and NFC side by side, grouped by division: W-L-T, win percentage, points for/against and differential, plus division, conference, home, and road records and current streak. Records are requested for the regular season only, so preseason results never leak into the standings.
+**Standings — two views.** A toggle switches between:
+
+- **By Division** (default) — all eight divisions as their own block, four teams each, division leader marked. W-L-T, win percentage, points for/against and differential, plus division, conference, home and road records and current streak. Ordering comes from ESPN's own division standings, which already applies the NFL tiebreakers.
+- **By Conference** — all 16 teams in one table per conference, ordered by playoff seed, for reading the wild-card race at a glance.
+
+Records are requested for the regular season only, so preseason results never leak into the standings.
+
+**Week selector.** The scoreboard, standings and map have their own week picker that opens on the week actually being played. It is deliberately independent of the game you have selected in the sidebar — otherwise browsing a future home game on a Sunday would hide that day's live slate.
+
+Game Map Tab
+------------
+
+Every game for the selected week plotted at its stadium's real coordinates on a clean Esri basemap. Markers can be coloured two ways:
+
+- **Weather impact** — the same green / yellow / red / dome palette used everywhere else in the app, so the map reads like the tables.
+- **Broadcast network** — CBS, FOX, NBC, ESPN, Prime Video, Netflix and NFL Network each get their own colour, giving a geographic picture of who is carrying what.
+
+Clicking a marker shows the matchup, stadium, local kickoff time, the network, the live or final score once the game has started, and the kickoff weather.
+
+> **Note on regional coverage.** This is a map of *where the games are*, not a regional TV coverage map. Which CBS or FOX game airs in which local television market is set by the networks each week and is not published in any public API — ESPN's feed reports only "national" versus "local" and never the market-by-market breakdown. Sites that publish those maps compile them by hand from network press releases. Rather than guess at market boundaries, the map shows the broadcaster for each game and leaves the distribution question alone.
 
 Before Week 1 kicks off, the standings show 0-0 and the playoff picture displays a placeholder; both populate automatically after the first games are played.
 
@@ -75,7 +95,7 @@ Open your terminal or command prompt and clone this repository to your local mac
 Open the `NFL_Weather_app.R` file in RStudio. In the RStudio console, run the following command to install all the necessary packages:
 
     ```r
-    install.packages(c("shiny", "shinydashboard", "dplyr", "httr", "jsonlite", "lubridate", "DT", "here", "shinycssloaders"))
+    install.packages(c("shiny", "shinydashboard", "dplyr", "httr", "jsonlite", "lubridate", "DT", "here", "shinycssloaders", "leaflet"))
     ```
 
 3. **Run the Application**
