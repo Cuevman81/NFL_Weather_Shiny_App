@@ -2166,11 +2166,18 @@ server <- function(input, output, session) {
     # light_all, light_all@2x and voyager alike). Esri's basemap is free, needs
     # no key, and is the same clean grey canvas. Note the {z}/{y}/{x} order —
     # Esri puts row before column, unlike the usual {z}/{x}/{y}.
+    # Attribution: Esri requires "Powered by Esri" plus the layer's own data
+    # credit, which is this service's copyrightText (MapServer?f=json). It
+    # includes OpenStreetMap, whose licence requires the credit wherever its
+    # data is shown.
     m <- leaflet::leaflet(options = leaflet::leafletOptions(minZoom = 3)) %>%
       leaflet::addTiles(
         urlTemplate = paste0("https://server.arcgisonline.com/ArcGIS/rest/services/",
                              "Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"),
-        attribution = "Tiles &copy; Esri",
+        attribution = paste0(
+          "Powered by <a href='https://www.esri.com' target='_blank' rel='noopener'>Esri</a> | ",
+          "Esri, HERE, Garmin, &copy; <a href='https://www.openstreetmap.org/copyright' ",
+          "target='_blank' rel='noopener'>OpenStreetMap</a> contributors, and the GIS user community"),
         options = leaflet::tileOptions(maxZoom = 16)) %>%
       leaflet::addCircleMarkers(
         lng = g$Longitude, lat = g$Latitude,
