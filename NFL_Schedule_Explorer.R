@@ -77,7 +77,9 @@ fetch_espn_standings <- function(season = 2026) {
     if (!length(rows)) return(NULL)
     bind_rows(rows) %>%
       mutate(DIFF = PF - PA) %>%
-      arrange(Division, Seed, desc(PCT), desc(DIFF))
+      # ESPN reports playoffSeed 0 for a team that hasn't played yet: that means
+      # unseeded, not first, so those sort last within their division.
+      arrange(Division, ifelse(is.na(Seed) | Seed < 1, 99, Seed), desc(PCT), desc(DIFF))
   }, error = function(e) {
     message("ESPN standings fetch failed: ", e$message)
     NULL
@@ -459,7 +461,7 @@ server <- function(input, output, session) {
     # so the ranking is taken from ESPN rather than recomputed here.
     build_seeds <- function(conf_prefix) {
       data %>%
-        filter(grepl(paste0("^", conf_prefix), Division), !is.na(Seed), Seed <= 7) %>%
+        filter(grepl(paste0("^", conf_prefix), Division), !is.na(Seed), Seed >= 1, Seed <= 7) %>%  # 0 = not seeded yet
         arrange(Seed) %>%
         mutate(Type = ifelse(Seed <= 4, "Division Winner", "Wild Card"))
     }
