@@ -119,6 +119,14 @@ feels_like_f <- function(temp_f, wind_mph, rh = NA) {
   round(out)
 }
 
+# Apparent temperature for every row of an NWS forecast table (hourly or daily).
+# Only the hourly feed carries humidity, so daily periods get wind chill but
+# never heat index — the same limit the kickoff headline has.
+period_feels_like <- function(fc) {
+  rh <- if ("relativeHumidity.value" %in% names(fc)) fc$relativeHumidity.value else NA
+  feels_like_f(fc$temperature, vapply(fc$windSpeed, parse_wind_mph, numeric(1), USE.NAMES = FALSE), rh)
+}
+
 # Safe aggregations: return NA instead of -Inf/Inf/NaN when everything is missing
 safe_max  <- function(x) { x <- x[!is.na(x)]; if (length(x) == 0) NA_real_ else max(x) }
 safe_min  <- function(x) { x <- x[!is.na(x)]; if (length(x) == 0) NA_real_ else min(x) }
@@ -173,7 +181,7 @@ calculate_weather_index <- function(temp, wind_speed, precip_chance, forecast_te
   
   # Temperature impact (below 20°F or above 95°F is concerning). Scored on the
   # apparent temperature when the caller supplies one — a 35°F day at 25 mph is
-  # a 22°F wind chill, and that is what players and the ball actually feel.
+  # a 23°F wind chill, and that is what players and the ball actually feel.
   if (!is.na(feels_like)) temp <- feels_like
   if (!is.na(temp)) {
     if (temp < 20) temp_score <- 2  # Very cold
@@ -233,10 +241,12 @@ calculate_weather_index <- function(temp, wind_speed, precip_chance, forecast_te
 }
 
 # Function to get detailed weather impact factors
-get_impact_factors <- function(temp, wind_speed, precip_chance, forecast_text) {
+get_impact_factors <- function(temp, wind_speed, precip_chance, forecast_text, feels_like = NA) {
   factors <- list()
-  
-  # Temperature factors
+
+  # Temperature factors, on the apparent temperature when supplied (the same
+  # rule calculate_weather_index uses, so the two never disagree)
+  if (!is.null(feels_like) && !is.na(feels_like)) temp <- feels_like
   if (!is.na(temp)) {
     if (temp < 20) factors$temperature <- "Extreme cold - player safety concern"
     else if (temp < 32) factors$temperature <- "Freezing conditions - ball handling affected"
@@ -1352,7 +1362,8 @@ server <- function(input, output, session) {
     dc <- display_conditions()
     if (is.null(dc)) return(NULL)
 
-    factors <- get_impact_factors(dc$temp, dc$wind, dc$precip, dc$conditions)
+    factors <- get_impact_factors(dc$temp, dc$wind, dc$precip, dc$conditions,
+                                  feels_like = dc$feels_like)
 
     scope_note <- if (identical(dc$scope, "kickoff")) {
       "Based on the forecast period covering kickoff."
@@ -1386,13 +1397,15 @@ server <- function(input, output, session) {
     forecast <- daily_forecast()
     if ("name" %in% names(forecast)) {
       enhanced_forecast <- forecast %>%
+        mutate(.feels = period_feels_like(pick(everything()))) %>%
         rowwise() %>%
         mutate(
           weather_index = list(calculate_weather_index(
             temperature,
             windSpeed,
             probabilityOfPrecipitation.value,
-            shortForecast
+            shortForecast,
+            feels_like = .feels
           )),
           Status = weather_index$status,
           Impact = weather_index$level
@@ -1458,7 +1471,8 @@ server <- function(input, output, session) {
           datetime_local = with_tz(datetime_utc, tzone = stadium_tz),
           
           # Step 3: Format the CORRECTED local time for display in the table.
-          Time = format(datetime_local, "%a %I:%M %p")
+          Time = format(datetime_local, "%a %I:%M %p"),
+          .feels = period_feels_like(pick(everything()))
         ) %>%
         rowwise() %>%
         mutate(
@@ -1466,7 +1480,8 @@ server <- function(input, output, session) {
             temperature,
             windSpeed,
             probabilityOfPrecipitation.value,
-            shortForecast
+            shortForecast,
+            feels_like = .feels
           )),
           Status = weather_index$status
         ) %>%
@@ -1642,13 +1657,15 @@ server <- function(input, output, session) {
     if (nrow(gametime) > 0) {
       worst_index <- "GREEN"
       worst_factors <- list()
-      
+      game_feels <- period_feels_like(gametime)
+
       for (i in 1:nrow(gametime)) {
         idx <- calculate_weather_index(
           gametime$temperature[i],
           gametime$windSpeed[i],
           gametime$probabilityOfPrecipitation.value[i],
-          gametime$shortForecast[i]
+          gametime$shortForecast[i],
+          feels_like = game_feels[i]
         )
         if (idx$status == "RED" || (idx$status == "YELLOW" && worst_index == "GREEN")) {
           worst_index <- idx$status
@@ -1656,7 +1673,8 @@ server <- function(input, output, session) {
             gametime$temperature[i],
             gametime$windSpeed[i],
             gametime$probabilityOfPrecipitation.value[i],
-            gametime$shortForecast[i]
+            gametime$shortForecast[i],
+            feels_like = game_feels[i]
           )
         }
       }
@@ -1757,11 +1775,13 @@ server <- function(input, output, session) {
         current_wind = if (!is.null(game_period)) game_period$windSpeed[1] else "N/A",
         current_precip = if (!is.null(game_period)) game_period$probabilityOfPrecipitation.value[1] else NA,
         current_conditions = if (!is.null(game_period)) game_period$shortForecast[1] else "Forecast Unavailable",
+        current_feels = if (!is.null(game_period)) period_feels_like(game_period)[1] else NA_real_,
 
         weather_index = if (Dome) {
           list(list(status = "DOME"))
         } else if (!is.null(game_period)) {
-          list(calculate_weather_index(current_temp, current_wind, current_precip, current_conditions))
+          list(calculate_weather_index(current_temp, current_wind, current_precip, current_conditions,
+                                       feels_like = current_feels))
         } else {
           list(list(status = "TBD"))
         },
