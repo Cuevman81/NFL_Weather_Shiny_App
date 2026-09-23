@@ -15,14 +15,14 @@ Key Features
 *   **Interactive Filtering:** View the entire 2026 NFL schedule by Week, Stadium, Team, or a specific Date.
 *   **Dynamic UI:** The interface updates intelligently based on your selections to show you the most relevant games.
 *   **Kickoff-Based Conditions:** The headline temperature, wind, and precipitation figures describe the forecast period that actually covers kickoff — not whatever the weather happens to be doing at the venue right now. When a game is still beyond the forecast horizon, the dashboard says so plainly and falls back to current venue conditions rather than passing them off as the game forecast.
-*   **Live Weather Data:** Utilizes the National Weather Service (NWS) API for up-to-date daily and hourly forecast information, plus real-time ASOS observations from the Iowa Environmental Mesonet. A **Refresh Weather & Scores** button clears every cache and re-pulls the latest conditions, scores, and standings on demand.
+*   **Live Weather Data:** Utilizes the National Weather Service (NWS) API for up-to-date daily and hourly forecast information, plus real-time ASOS observations from the Iowa Environmental Mesonet. A **Refresh Weather & Scores** button clears every cache and re-pulls the latest conditions, scores, and standings on demand. Because that cache is shared by everyone using the app, it is cleared at most once a minute.
 *   **Game Impact Assessment:** A color-coded system (Green, Yellow, Red) provides an immediate sense of the potential for weather to disrupt a game.
 *   **Custom Gameplay Scores:**
     -   **Kicking Score (1-10):** A unique score that heavily weights wind, precipitation, and cold to grade the difficulty of the kicking game.
     -   **Passing Score (1-10):** A second score that analyzes wind, precipitation, and extreme temperatures to grade the conditions for the passing game.
     -   **Rush Advantage (0-10):** Grades how strongly the weather favors the running game over the pass (cold, precipitation, and snow push this higher).
 *   **Wind vs. Field Orientation:** Uses each stadium's long-axis bearing to classify kickoff wind as Along-Field, Diagonal, or Crosswind.
-*   **Feels-Like Temperature:** Wind chill and heat index computed with the NWS formulas. Impact scoring uses the apparent temperature, so a 35°F kickoff at 25 mph is graded as the 22°F wind chill it actually is. NWS wind ranges ("15 to 25 mph") are scored against their upper bound.
+*   **Feels-Like Temperature:** Wind chill and heat index computed with the NWS formulas. Impact scoring uses the apparent temperature in the headline, every forecast table, the Week Overview and the Game Map, so a 35°F kickoff at 25 mph is graded as the 23°F wind chill it actually is. Hourly periods get wind chill and heat index; the 12-hour daily periods carry no humidity, so they get wind chill only. NWS wind ranges ("15 to 25 mph") are scored against their upper bound.
 *   **Standings, Scores & Playoff Picture:** Live scoreboard, standings viewable by division or by conference (record, division/conference/home/road splits, streak), and playoff seeds 1–7 per conference with clinch status — all from ESPN, which applies the full NFL tiebreaker procedure. Scores refresh automatically every minute while a game is in progress, and final scores also appear beside each game in the Week Overview.
 *   **In-Depth Analysis Tabs:**
     -   **7-Day Outlook:** A summary of the week's forecast with impact ratings for each period.
@@ -31,7 +31,7 @@ Key Features
     -   **Week Overview:** A master table of every game for a given week, with the ability to filter out games played in domes. It follows whichever game you have selected, so it always describes the same week as the rest of the dashboard. Once a game kicks off, its score and status appear in the row.
     -   **Standings & Scores:** Live scoreboard, playoff picture, and standings by division or conference — detailed below.
     -   **Game Map:** Every game for the week mapped at its stadium, coloured by weather impact or broadcast network.
-*   **Domes and International Venues Handled Explicitly:** Indoor stadiums are flagged and skip weather lookups entirely. The 2026 slate includes eight games outside the United States (Melbourne, Rio de Janeiro, London ×2, Paris, Madrid, Munich, and Monterrey); these sit outside National Weather Service coverage and are labelled as such instead of showing a misleading forecast.
+*   **Domes and International Venues Handled Explicitly:** Indoor stadiums are flagged and skip weather lookups entirely. The 2026 slate includes nine games outside the United States (Melbourne, Rio de Janeiro, London ×3, Paris, Madrid, Munich, and Mexico City); these sit outside National Weather Service coverage and are labelled as such instead of showing a misleading forecast.
 
 Standings & Scores Tab
 ----------------------
@@ -113,7 +113,7 @@ This application relies on the following sources for its data:
 *   **Standings & Scores:** ESPN's public NFL endpoints (no key required). Standings are requested for the regular season only, so preseason results never leak into the records.
 *   **Schedule Data:** The `nfl_schedule_2026_detailed.csv` file included in this repository.
 
-Everything is cached in-process — forecasts for 10 minutes, observations and standings for 5, scores for 1 — so repeated views don't re-hit the APIs, and the in-game score refresh can never exceed one request a minute. Every outbound request has a 12-second timeout.
+Everything is cached in-process — forecasts for 10 minutes, observations and standings for 5, scores for 1 — so repeated views don't re-hit the APIs, and the in-game score refresh can never exceed one request a minute. Each stadium's NWS gridpoint lookup is kept for the life of the process, and a failed forecast is remembered for 2 minutes so an NWS slowdown isn't retried on every render. Every outbound request has a 12-second timeout. An ASOS report more than 2 hours old is not shown as current conditions.
 
 Repository Contents
 -------------------
@@ -125,6 +125,7 @@ Repository Contents
 | `NFL_Weather_CSV_Creater_2026.R` | Builds the detailed schedule; holds the stadium dictionary (coordinates, timezone, ICAO station, surface, dome status, field orientation) |
 | `nfl_schedule_2026.csv` | Base schedule — input to the builder |
 | `nfl_schedule_2026_detailed.csv` | Builder output — read by both apps |
+| `tests/server_tests.R` | Runs the real `server()` through `shiny::testServer` with a faked clock and stubbed NWS/IEM/ESPN replies, in UTC like shinyapps.io. No network needed: `TZ=UTC Rscript --vanilla tests/server_tests.R` |
 
 Only `NFL_Weather_app.R` and `nfl_schedule_2026_detailed.csv` are deployed. When games change, edit `nfl_schedule_2026.csv` and re-run the builder.
 
