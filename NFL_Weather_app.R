@@ -510,6 +510,11 @@ get_current_observations <- function(station_code) {
     # IEM stamps observations as "YYYY-MM-DD HH:MM" in UTC
     obs$valid <- ymd_hm(obs$valid, tz = "UTC", quiet = TRUE)
     latest <- obs[nrow(obs), , drop = FALSE]
+    # A station that has stopped reporting would otherwise pass off yesterday's
+    # temperature as "Current". ASOS reports hourly, so anything over 2 hours
+    # old is treated as no observation and the forecast fallback takes over.
+    age_h <- as.numeric(difftime(Sys.time(), latest$valid, units = "hours"))
+    if (is.na(age_h) || age_h > 2) latest <- NULL
     .nws_cache[[cache_key]] <- list(time = Sys.time(), data = latest)
     latest
   }, error = function(e) {
@@ -1328,7 +1333,7 @@ server <- function(input, output, session) {
         if (!is.na(dc$station)) p(strong("Source Station:"), dc$station),
         if (!is.null(dc$obs_time))
           p(strong("Observation Time:"),
-            format(with_tz(dc$obs_time, tzone = game$TimeZone), "%I:%M %p %Z"))
+            format(with_tz(dc$obs_time, tzone = game$TimeZone), "%a %b %d, %I:%M %p %Z"))
     )
   })
   
