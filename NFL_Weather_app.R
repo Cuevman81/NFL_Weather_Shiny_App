@@ -2132,6 +2132,10 @@ server <- function(input, output, session) {
     pal <- if (by_network) NETWORK_COLORS else STATUS_COLORS
     cols <- pick_color(key, pal)
 
+    # Leaflet popups are HTML. ESPN's status text and NWS's wind string are
+    # escaped before they go in, like every DT table in the app; the CSV
+    # values too, which also makes "AT&T Stadium" valid HTML.
+    esc <- function(x) htmltools::htmlEscape(as.character(x))
     kickoff <- paste(format(g$game_date, "%a %b %d"), "·",
                      sub(".*\\((.*)\\)$", "\\1", g$game_label))
     wx <- ifelse(
@@ -2139,16 +2143,16 @@ server <- function(input, output, session) {
       ifelse(!grepl("^K", g$Station_ICAO), "Outside NWS coverage (international venue)",
       ifelse(is.na(g$current_temp) & g$game_datetime < Sys.time(), "Already played — forecast no longer retained",
       ifelse(is.na(g$current_temp), "Forecast not yet available (beyond the NWS forecast range)",
-             paste0(g$current_temp, "&deg;F &middot; ", g$current_wind, " &middot; ",
-                    ifelse(is.na(g$current_precip), "0", g$current_precip), "% precip")))))
+             paste0(esc(g$current_temp), "&deg;F &middot; ", esc(g$current_wind), " &middot; ",
+                    ifelse(is.na(g$current_precip), "0", esc(g$current_precip)), "% precip")))))
 
     popup <- paste0(
       "<div style='font-size:13px; line-height:1.5;'>",
-      "<strong style='font-size:15px;'>", g$Away_Team, " @ ", g$Home_Team, "</strong><br/>",
-      "<span style='color:#555;'>", g$Stadium, ", ", g$City, "</span><br/>",
-      kickoff, "<br/>",
-      "<span style='color:#555;'>TV:</span> <strong>", g$Network, "</strong>",
-      ifelse(nzchar(g$Score), paste0("<br/><span style='color:#004085; font-weight:700;'>", g$Score, "</span>"), ""),
+      "<strong style='font-size:15px;'>", esc(g$Away_Team), " @ ", esc(g$Home_Team), "</strong><br/>",
+      "<span style='color:#555;'>", esc(g$Stadium), ", ", esc(g$City), "</span><br/>",
+      esc(kickoff), "<br/>",
+      "<span style='color:#555;'>TV:</span> <strong>", esc(g$Network), "</strong>",
+      ifelse(nzchar(g$Score), paste0("<br/><span style='color:#004085; font-weight:700;'>", esc(g$Score), "</span>"), ""),
       "<hr style='margin:6px 0;'/>", wx,
       "</div>")
 
