@@ -15,11 +15,11 @@ Key Features
 *   **Interactive Filtering:** View the entire 2026 NFL schedule by Week, Stadium, Team, or a specific Date.
 *   **Dynamic UI:** The interface updates intelligently based on your selections to show you the most relevant games.
 *   **Kickoff-Based Conditions:** The headline temperature, wind, and precipitation figures describe the forecast period that actually covers kickoff — not whatever the weather happens to be doing at the venue right now. When a game is still beyond the forecast horizon, the dashboard says so plainly and falls back to current venue conditions rather than passing them off as the game forecast.
-*   **Live Weather Data:** Utilizes the National Weather Service (NWS) API for up-to-date daily and hourly forecast information, plus real-time ASOS observations from the Iowa Environmental Mesonet. A **Refresh Weather & Scores** button clears every cache and re-pulls the latest conditions, scores, and standings on demand. Because that cache is shared by everyone using the app, it is cleared at most once a minute.
+*   **Live Weather Data:** Utilizes the National Weather Service (NWS) API for up-to-date daily and hourly forecast information, plus real-time ASOS observations from the Iowa Environmental Mesonet. A **Refresh Weather & Scores** button clears the cached forecasts, observations, scores and standings and re-pulls them on demand. Because that cache is shared by everyone using the app, it is cleared at most once a minute.
 *   **Game Impact Assessment:** A color-coded system (Green, Yellow, Red) provides an immediate sense of the potential for weather to disrupt a game.
 *   **Custom Gameplay Scores:**
-    -   **Kicking Score (1-10):** A unique score that heavily weights wind, precipitation, and cold to grade the difficulty of the kicking game.
-    -   **Passing Score (1-10):** A second score that analyzes wind, precipitation, and extreme temperatures to grade the conditions for the passing game.
+    -   **Kicking Score (1-10):** A unique score that heavily weights wind, precipitation, and snow or ice to grade the difficulty of the kicking game.
+    -   **Passing Score (1-10):** A second score that analyzes wind, precipitation, and cold to grade the conditions for the passing game.
     -   **Rush Advantage (0-10):** Grades how strongly the weather favors the running game over the pass (cold, precipitation, and snow push this higher).
 *   **Wind vs. Field Orientation:** Uses each stadium's long-axis bearing to classify kickoff wind as Along-Field, Diagonal, or Crosswind.
 *   **Feels-Like Temperature:** Wind chill and heat index computed with the NWS formulas. Impact scoring uses the apparent temperature in the headline, every forecast table, the Week Overview and the Game Map, so a 35°F kickoff at 25 mph is graded as the 23°F wind chill it actually is. Hourly periods get wind chill and heat index; the 12-hour daily periods carry no humidity, so they get wind chill only. NWS wind ranges ("15 to 25 mph") are scored against their upper bound.
@@ -99,6 +99,8 @@ Open the `NFL_Weather_app.R` file in RStudio. In the RStudio console, run the fo
     ```r
     install.packages(c("shiny", "shinydashboard", "dplyr", "httr", "jsonlite", "lubridate", "DT", "here", "shinycssloaders", "leaflet"))
     ```
+
+    The Schedule Explorer and the schedule builder also need `ggplot2`, `tidyr` and `stringr`.
 
 3. **Run the Application**
 With the `NFL_Weather_app.R` file open in RStudio, click the **Run App** button located at the top-right of the editor pane. The application will launch in a new window or in your default web browser.
