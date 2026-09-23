@@ -68,6 +68,10 @@ tryCatch({
   stop(paste("Error processing schedule data:", conditionMessage(e)))
 })
 
+# How long after kickoff a game still counts as being played. Games run about
+# 3 to 3.5 hours; 4 leaves room for overtime and a weather delay.
+GAME_WINDOW_SECS <- 4 * 3600
+
 # 3. WEATHER ASSESSMENT FUNCTIONS ----
 
 # Parses NWS wind strings like "15 mph", "10 to 20 mph", "Calm" → numeric mph
@@ -1734,7 +1738,17 @@ server <- function(input, output, session) {
             ) %>%
             filter(game_time_utc >= start_time_utc & game_time_utc < end_time_utc) %>%
             slice(1)
-          if (nrow(matching_period) > 0) list(matching_period) else list(slice(forecast_data, 1))
+          if (nrow(matching_period) > 0) {
+            list(matching_period)
+          } else if (game_time_utc <= Sys.time() && game_time_utc > Sys.time() - GAME_WINDOW_SECS) {
+            # Game under way: kickoff is before the first period, and the
+            # current period is the honest answer.
+            list(slice(forecast_data, 1))
+          } else {
+            # Kickoff is beyond the forecast (NWS's 14 periods end on day 7 at
+            # 6 AM/PM). Say so rather than rate next week's game on today's sky.
+            list(NULL)
+          }
         } else {
           list(NULL)
         },
@@ -2057,10 +2071,11 @@ server <- function(input, output, session) {
                      sub(".*\\((.*)\\)$", "\\1", g$game_label))
     wx <- ifelse(
       g$Dome, "Indoor / dome — weather not a factor",
-      ifelse(is.na(g$current_temp) & g$game_date < Sys.Date(), "Already played — forecast no longer retained",
-      ifelse(is.na(g$current_temp), "Forecast not yet available (beyond the 7-day window)",
+      ifelse(!grepl("^K", g$Station_ICAO), "Outside NWS coverage (international venue)",
+      ifelse(is.na(g$current_temp) & g$game_datetime < Sys.time(), "Already played — forecast no longer retained",
+      ifelse(is.na(g$current_temp), "Forecast not yet available (beyond the NWS forecast range)",
              paste0(g$current_temp, "&deg;F &middot; ", g$current_wind, " &middot; ",
-                    ifelse(is.na(g$current_precip), "0", g$current_precip), "% precip"))))
+                    ifelse(is.na(g$current_precip), "0", g$current_precip), "% precip")))))
 
     popup <- paste0(
       "<div style='font-size:13px; line-height:1.5;'>",
