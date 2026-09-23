@@ -369,6 +369,33 @@ calculate_rushing_score <- function(temp, precip_chance, forecast_text) {
 # 10-minute cache keyed on "lat,lon_d" or "lat,lon_h" — shared across sessions on the same R process
 .nws_cache <- new.env(parent = emptyenv())
 
+# A stadium's /points answer (its forecast URLs) doesn't change, so it is kept
+# for the life of the process and survives Refresh. That halves the NWS calls
+# every time a forecast expires. An entry is dropped if its forecast URL fails,
+# so a gridpoint NWS has moved is looked up again on the next try.
+.nws_points <- new.env(parent = emptyenv())
+
+# A failed forecast is remembered this long, so an NWS slowdown costs one
+# timed-out call per stadium instead of one on every render.
+NWS_FAILURE_TTL_MIN <- 2
+
+# Refresh empties the cache every visitor on this process shares; at most once
+# a minute, so one person clicking repeatedly can't force everyone's next view
+# to re-download (a cold Week Overview is 7-13 NWS calls in a row).
+REFRESH_COOLDOWN_SECS <- 60
+.refresh_state <- new.env(parent = emptyenv())
+.refresh_state$last_clear <- .POSIXct(-Inf)
+
+clear_shared_cache <- function(now = Sys.time()) {
+  if (as.numeric(difftime(now, .refresh_state$last_clear, units = "secs")) < REFRESH_COOLDOWN_SECS) {
+    return(invisible(FALSE))
+  }
+  keys <- ls(.nws_cache)
+  if (length(keys) > 0) rm(list = keys, envir = .nws_cache)
+  .refresh_state$last_clear <- now
+  invisible(TRUE)
+}
+
 get_nws_forecast <- function(lat, lon, hourly = FALSE, station = NULL) {
   if (length(lat) != 1 || length(lon) != 1 || is.na(lat) || is.na(lon)) {
     return(data.frame(Status = "Invalid or missing stadium coordinates provided."))
@@ -386,22 +413,34 @@ get_nws_forecast <- function(lat, lon, hourly = FALSE, station = NULL) {
 
   cache_key <- paste0(round(lat, 3), ",", round(lon, 3), "_", if (hourly) "h" else "d")
   cached <- .nws_cache[[cache_key]]
-  if (!is.null(cached) && as.numeric(difftime(Sys.time(), cached$time, units = "mins")) < 10) {
+  ttl_min <- if (is.null(cached$ttl_min)) 10 else cached$ttl_min
+  if (!is.null(cached) && as.numeric(difftime(Sys.time(), cached$time, units = "mins")) < ttl_min) {
     return(cached$data)
   }
 
   points_url <- paste0("https://api.weather.gov/points/", lat, ",", lon)
+  points_key <- paste0(round(lat, 3), ",", round(lon, 3))
   user_agent_header <- add_headers("User-Agent" = "NFL Weather App (RodneyJCuevas@gmail.com)")
 
   tryCatch({
     # A 12s timeout keeps a slow/throttled NWS response from freezing the
     # single-threaded R process (which would hang every other output).
-    points_response <- GET(points_url, user_agent_header, timeout(12))
-    stop_for_status(points_response, "get gridpoint metadata")
-    points_data <- fromJSON(content(points_response, "text", encoding = "UTF-8"), flatten = TRUE)
-    forecast_url <- if (hourly) points_data$properties$forecastHourly else points_data$properties$forecast
+    points <- .nws_points[[points_key]]
+    if (is.null(points)) {
+      points_response <- GET(points_url, user_agent_header, timeout(12))
+      stop_for_status(points_response, "get gridpoint metadata")
+      points_data <- fromJSON(content(points_response, "text", encoding = "UTF-8"), flatten = TRUE)
+      points <- list(daily  = points_data$properties$forecast,
+                     hourly = points_data$properties$forecastHourly)
+      if (!is.null(points$daily) && !is.null(points$hourly)) .nws_points[[points_key]] <- points
+    }
+    forecast_url <- if (hourly) points$hourly else points$daily
     if (is.null(forecast_url)) return(data.frame(Status = "Forecast URL not found for this location."))
     forecast_response <- GET(forecast_url, user_agent_header, timeout(12))
+    if (http_error(forecast_response)) {
+      # Look the gridpoint up again next time, in case NWS has moved it
+      if (exists(points_key, envir = .nws_points, inherits = FALSE)) rm(list = points_key, envir = .nws_points)
+    }
     stop_for_status(forecast_response, "get forecast data")
     forecast_data <- fromJSON(content(forecast_response, "text", encoding = "UTF-8"), flatten = TRUE)
     result <- as_tibble(forecast_data$properties$periods)
@@ -412,7 +451,9 @@ get_nws_forecast <- function(lat, lon, hourly = FALSE, station = NULL) {
     result
   }, error = function(e) {
     message(paste("API Error:", e$message))
-    return(data.frame(Status = paste("Could not retrieve forecast. API may be down or location is outside the US.")))
+    failed <- data.frame(Status = paste("Could not retrieve forecast. API may be down or location is outside the US."))
+    .nws_cache[[cache_key]] <- list(time = Sys.time(), data = failed, ttl_min = NWS_FAILURE_TTL_MIN)
+    failed
   })
 }
 
@@ -929,12 +970,12 @@ ui <- dashboardPage(
 # 6. DEFINE SERVER LOGIC ----
 server <- function(input, output, session) {
 
-  # Manual weather refresh: clears the shared NWS cache and re-triggers every
-  # weather reactive that takes a dependency on weather_refresh().
+  # Manual weather refresh: clears the shared NWS cache (at most once a minute
+  # across all visitors, see clear_shared_cache) and re-triggers every weather
+  # reactive that takes a dependency on weather_refresh().
   weather_refresh <- reactiveVal(Sys.time())
   observeEvent(input$refresh_weather, {
-    keys <- ls(.nws_cache)
-    if (length(keys) > 0) rm(list = keys, envir = .nws_cache)
+    clear_shared_cache()
     weather_refresh(Sys.time())
   })
 
