@@ -12,6 +12,13 @@ library(here)
 library(shinycssloaders)
 library(leaflet)
 
+# shinyapps.io runs in UTC, so a bare Sys.Date() there rolls over at 8 PM EDT
+# (7 PM EST), before every primetime kickoff: that night's game dropped out of
+# the pickers and read as "already played". Pin the process to the schedule's
+# own zone before anything reads the clock. Eastern is safe for every venue —
+# no NFL game kicks off after 11:59 PM Eastern.
+Sys.setenv(TZ = "America/New_York")
+
 
 # 2. LOAD SCHEDULE DATA ----
 tryCatch({
@@ -418,9 +425,12 @@ get_current_observations <- function(station_code) {
 
   tryCatch({
     # Yesterday through tomorrow in UTC, so a late local kickoff (or a station
-    # that reports sparsely) still has observations in range.
-    from <- Sys.Date() - 1
-    to   <- Sys.Date() + 1
+    # that reports sparsely) still has observations in range. The dates must be
+    # UTC ones: the request is in UTC, and a local Sys.Date() is a day behind UTC
+    # every evening, which would end the window before the latest report.
+    today_utc <- as.Date(Sys.time(), tz = "UTC")
+    from <- today_utc - 1
+    to   <- today_utc + 1
     resp <- GET(
       "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py",
       query = list(
