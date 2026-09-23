@@ -985,9 +985,11 @@ server <- function(input, output, session) {
 
   # Reactive to determine the current NFL week
   current_nfl_week <- reactive({
-    # Find the earliest game that hasn't happened yet using the precise time
+    # The week of the earliest game not yet finished. A game that kicked off
+    # within GAME_WINDOW_SECS still counts, so the app doesn't jump to next
+    # week the moment the week's last game (usually MNF) kicks off.
     upcoming_game <- schedule_data %>%
-      filter(game_datetime >= Sys.time()) %>% # <-- THE FIX IS HERE
+      filter(game_datetime >= Sys.time() - GAME_WINDOW_SECS) %>%
       arrange(game_datetime) %>%
       slice(1) # Get the very next game
     
@@ -1056,10 +1058,12 @@ server <- function(input, output, session) {
     # Check if the selected week is the same as the current NFL week
     is_current_week <- as.numeric(input$selected_week) == current_nfl_week()
     
-    # If it IS the current week, filter out games that have already started.
+    # If it IS the current week, filter out games that are already over. A game
+    # still being played stays listed (the same window current_nfl_week()
+    # uses), so Week mode doesn't open on an empty list during MNF.
     if (is_current_week) {
       games_to_display <- games_for_week %>%
-        filter(game_datetime >= Sys.time()) # <-- THE FIX IS HERE
+        filter(game_datetime >= Sys.time() - GAME_WINDOW_SECS)
     } else {
       # Otherwise, show all games for the selected week (for past/future weeks).
       games_to_display <- games_for_week
